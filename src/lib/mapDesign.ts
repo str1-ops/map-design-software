@@ -405,22 +405,6 @@ export async function exportMapPng(args: {
     if (!ctx) throw new Error('Could not create the export canvas.')
     ctx.drawImage(exportMap.getCanvas(), 0, 0, width, height)
 
-    const attribution = 'OpenFreeMap © OpenMapTiles · Data from OpenStreetMap · ODbL: openstreetmap.org/copyright'
-    const fontSize = Math.max(11, Math.min(17, Math.round(width / 180)))
-    ctx.font = `${fontSize}px Arial, sans-serif`
-    const metrics = ctx.measureText(attribution)
-    const padX = Math.max(8, Math.round(fontSize * 0.55))
-    const padY = Math.max(6, Math.round(fontSize * 0.42))
-    const boxWidth = metrics.width + padX * 2
-    const boxHeight = fontSize + padY * 2
-    const x = width - boxWidth - Math.max(8, Math.round(fontSize * 0.5))
-    const y = height - boxHeight - Math.max(8, Math.round(fontSize * 0.5))
-    ctx.fillStyle = 'rgba(255,255,255,0.82)'
-    ctx.fillRect(x, y, boxWidth, boxHeight)
-    ctx.fillStyle = '#262622'
-    ctx.textBaseline = 'middle'
-    ctx.fillText(attribution, x + padX, y + boxHeight / 2)
-
     const dataUrl = output.toDataURL('image/png')
     downloadDataUrl(dataUrl, args.filename)
   } finally {
