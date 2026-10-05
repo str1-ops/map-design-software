@@ -12,6 +12,7 @@ export type MapTheme = {
   buildings: string
   roads: string
   minorRoads: string
+  railways: string
   boundaries: string
   labels: string
   labelHalo: string
@@ -24,6 +25,7 @@ export type MapTheme = {
 export type LayerVisibility = {
   roads: boolean
   minorRoads: boolean
+  railways: boolean
   buildings: boolean
   parks: boolean
   boundaries: boolean
@@ -63,6 +65,7 @@ export const DEFAULT_THEME: MapTheme = {
   buildings: '#ded8cc',
   roads: '#ffffff',
   minorRoads: '#ebe7df',
+  railways: '#8b8880',
   boundaries: '#b7b0a4',
   labels: '#282825',
   labelHalo: '#f2efe7',
@@ -82,6 +85,7 @@ export const THEME_PRESETS: Record<string, MapTheme> = {
     buildings: '#e4d7c6',
     roads: '#fffaf1',
     minorRoads: '#eee5d8',
+    railways: '#817a70',
     featured: '#1c4246',
     featuredText: '#16363a',
     featuredHalo: '#fffaf1',
@@ -94,6 +98,7 @@ export const THEME_PRESETS: Record<string, MapTheme> = {
     buildings: '#d3d2cd',
     roads: '#ffffff',
     minorRoads: '#e7e6e1',
+    railways: '#85847e',
     boundaries: '#aaa9a4',
     labels: '#20201e',
     labelHalo: '#f2f1ed',
@@ -109,6 +114,7 @@ export const THEME_PRESETS: Record<string, MapTheme> = {
     buildings: '#2d2d28',
     roads: '#575850',
     minorRoads: '#363731',
+    railways: '#9a968a',
     boundaries: '#56574f',
     labels: '#ece8da',
     labelHalo: '#171814',
@@ -140,6 +146,10 @@ function isBoundary(layer: any) {
   return layer.type === 'line' && includes(layerFingerprint(layer), /boundary|admin/)
 }
 
+function isRailway(layer: any) {
+  return layer.type === 'line' && includes(layerFingerprint(layer), /rail/)
+}
+
 function isMinorRoad(layer: any) {
   return layer.type === 'line' && includes(layerFingerprint(layer), /minor|residential|service|path|track|foot|cycle|pedestrian/)
 }
@@ -169,6 +179,7 @@ function visibilityForLayer(layer: any, visibility: LayerVisibility): 'visible' 
   if (isBuilding(layer) && !visibility.buildings) return 'none'
   if (isPark(layer) && !visibility.parks) return 'none'
   if (isBoundary(layer) && !visibility.boundaries) return 'none'
+  if (isRailway(layer)) return visibility.railways ? undefined : 'none'
   if (isRoad(layer) && !visibility.roads) return 'none'
   if (isMinorRoad(layer) && (!visibility.roads || !visibility.minorRoads)) return 'none'
   if (layer.type === 'symbol') {
@@ -220,7 +231,8 @@ export function applyMapDesign(map: Map, theme: MapTheme, visibility: LayerVisib
     }
 
     if (layer.type === 'line') {
-      if (isBoundary(layer)) setPaintSafe(map, id, 'line-color', theme.boundaries)
+      if (isRailway(layer)) setPaintSafe(map, id, 'line-color', theme.railways)
+      else if (isBoundary(layer)) setPaintSafe(map, id, 'line-color', theme.boundaries)
       else if (isMinorRoad(layer)) setPaintSafe(map, id, 'line-color', theme.minorRoads)
       else if (isRoad(layer)) setPaintSafe(map, id, 'line-color', theme.roads)
     }
