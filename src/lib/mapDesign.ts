@@ -342,6 +342,7 @@ export async function exportMapPng(args: {
   filename: string
   size: PrintSize
   camera: CameraState
+  previewViewport: { width: number; height: number }
   theme: MapTheme
   visibility: LayerVisibility
   featuredPlaces: FeaturedPlace[]
@@ -351,12 +352,19 @@ export async function exportMapPng(args: {
     throw new Error(`Export is ${width} × ${height}px. Reduce the DPI or physical size for this browser export.`)
   }
 
+  const logicalWidth = Math.max(1, Math.round(args.previewViewport.width))
+  const logicalHeight = Math.max(1, Math.round(args.previewViewport.height))
+  if (!args.previewViewport.width || !args.previewViewport.height) {
+    throw new Error('The preview canvas is not ready yet. Move or resize the map once, then export again.')
+  }
+  const exportPixelRatio = Math.max(1, Math.min(width / logicalWidth, height / logicalHeight))
+
   const host = document.createElement('div')
   host.style.position = 'fixed'
   host.style.left = '-100000px'
   host.style.top = '0'
-  host.style.width = `${width}px`
-  host.style.height = `${height}px`
+  host.style.width = `${logicalWidth}px`
+  host.style.height = `${logicalHeight}px`
   document.body.appendChild(host)
 
   const maplibregl = await import('maplibre-gl')
@@ -369,6 +377,8 @@ export async function exportMapPng(args: {
     pitch: args.camera.pitch,
     interactive: false,
     attributionControl: false,
+    pixelRatio: exportPixelRatio,
+    maxCanvasSize: [width, height],
     canvasContextAttributes: { preserveDrawingBuffer: true },
   })
 
