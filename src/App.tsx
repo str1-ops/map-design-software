@@ -44,7 +44,7 @@ function MapView({project,pick,onCamera,onPick}:{project:Project;pick:boolean;on
   latest.current={onCamera,onPick}
   useEffect(()=>{
     if(!host.current || mapRef.current) return
-    const map=new maplibregl.Map({container:host.current,style:BASE_STYLE_URL,center:project.camera.center,zoom:project.camera.zoom,bearing:0,pitch:0,attributionControl:true,canvasContextAttributes:{preserveDrawingBuffer:true}})
+    const map=new maplibregl.Map({container:host.current,style:BASE_STYLE_URL,center:project.camera.center,zoom:project.camera.zoom,bearing:0,pitch:0,attributionControl:{},canvasContextAttributes:{preserveDrawingBuffer:true}})
     mapRef.current=map; map.addControl(new maplibregl.NavigationControl({visualizePitch:false}),'top-right')
     const ro=new ResizeObserver(()=>map.resize()); ro.observe(host.current)
     map.on('load',()=>{ applyMapDesign(map,project.theme,project.visible); ensureFeaturedLayers(map,project.places,project.theme) })
