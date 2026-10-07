@@ -4,7 +4,7 @@ import type { Map as MapLibreMap } from 'maplibre-gl'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url'
 import {
   BASE_STYLE_URL, DEFAULT_THEME, THEME_PRESETS, applyMapDesign,
-  ensureFeaturedLayers, exportMapPng, guessFeatureName, totalPrintPixels,
+  ensureFeaturedLayers, exportMapPng, exportMapSvg, guessFeatureName, totalPrintPixels,
   type CameraState, type FeaturedPlace, type LayerVisibility,
   type MapTheme, type PrintSize,
 } from './lib/mapDesign'
@@ -83,8 +83,9 @@ export default function App(){
   const go=(r:SearchResult)=>{patch('camera',{...project.camera,center:[Number(r.lon),Number(r.lat)],zoom:r.type==='city'||r.type==='town'?12:14});setResults([])}
   const add=(p:FeaturedPlace)=>{patch('places',[...project.places,p]);setPick(false);setTab('places')}
   const exportPng=async()=>{setBusy(true);try{await exportMapPng({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.png`,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places});setNote('Print PNG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
+  const exportSvg=async()=>{setBusy(true);try{await exportMapSvg({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.svg`,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places});setNote('SVG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
   return <div className="shell">
-    <header><b>STRictons <small>MAP STUDIO</small></b><input value={project.name} onChange={e=>patch('name',e.target.value)}/><button onClick={exportPng} disabled={busy}>↓ Export PNG</button></header>
+    <header><b>STRictons <small>MAP STUDIO</small></b><input value={project.name} onChange={e=>patch('name',e.target.value)}/><div className="export-actions"><button onClick={exportPng} disabled={busy}>↓ PNG</button><button onClick={exportSvg} disabled={busy}>↓ SVG</button></div></header>
     <aside>
       <nav>{(['document','style','places'] as const).map(x=><button className={tab===x?'on':''} onClick={()=>setTab(x)} key={x}>{x}</button>)}</nav>
       <div className="panel">
@@ -97,6 +98,7 @@ export default function App(){
       {tab==='style'&&<>
         <h3>Presets <em>starting point</em></h3><div className="theme-presets">{Object.entries(THEME_PRESETS).map(([n,t])=><button key={n} onClick={()=>patch('theme',{...t})}><i style={{background:`linear-gradient(135deg,${t.land} 0 55%,${t.water} 55% 75%,${t.featured} 75%)`}}/>{n}</button>)}</div>
         <h3>Palette <em>live vector styling</em></h3>{([['Land','land'],['Water','water'],['Parks','parks'],['Buildings','buildings'],['Major roads','roads'],['Minor roads','minorRoads'],['Railways','railways'],['Map labels','labels'],['Featured','featured']] as [string,keyof MapTheme][]).map(([l,k])=><Colour key={k} label={l} value={String(project.theme[k])} onChange={v=>theme(k,v as never)}/>)}
+        <h3>Line weights <em>relative thickness</em></h3><label className="range">Major roads <b>{project.theme.roadWidthScale.toFixed(2)}×</b><input type="range" min="0.25" max="2.5" step="0.05" value={project.theme.roadWidthScale} onChange={e=>theme('roadWidthScale',+e.target.value)}/></label><label className="range">Minor roads & paths <b>{project.theme.minorRoadWidthScale.toFixed(2)}×</b><input type="range" min="0.25" max="2.5" step="0.05" value={project.theme.minorRoadWidthScale} onChange={e=>theme('minorRoadWidthScale',+e.target.value)}/></label>
         <h3>Base detail <em>what appears</em></h3>{([['Road network','roads'],['Minor roads & paths','minorRoads'],['Rail network','railways'],['Buildings','buildings'],['Parks & land use','parks'],['Boundaries','boundaries'],['All base labels','labels'],['Suburbs & towns','placeLabels'],['Road names','roadLabels'],['OSM POIs','poiLabels'],['Water names','waterLabels']] as [string,keyof LayerVisibility][]).map(([l,k])=><Toggle key={k} label={l} value={project.visible[k]} onChange={v=>visible(k,v)}/>)}
       </>}
       {tab==='places'&&<>
