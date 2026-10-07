@@ -12,6 +12,8 @@ export type MapTheme = {
   buildings: string
   roads: string
   minorRoads: string
+  roadWidthScale: number
+  minorRoadWidthScale: number
   railways: string
   boundaries: string
   labels: string
@@ -65,6 +67,8 @@ export const DEFAULT_THEME: MapTheme = {
   buildings: '#ded8cc',
   roads: '#ffffff',
   minorRoads: '#ebe7df',
+  roadWidthScale: 1,
+  minorRoadWidthScale: 1,
   railways: '#8b8880',
   boundaries: '#b7b0a4',
   labels: '#282825',
@@ -125,6 +129,30 @@ export const THEME_PRESETS: Record<string, MapTheme> = {
 }
 
 const includes = (value: string, pattern: RegExp) => pattern.test(value.toLowerCase())
+
+const originalLineWidths = new WeakMap<Map, Map<string, unknown>>()
+
+function getOriginalLineWidth(map: Map, layerId: string) {
+  let widths = originalLineWidths.get(map)
+  if (!widths) {
+    widths = new Map<string, unknown>()
+    originalLineWidths.set(map, widths)
+  }
+  if (!widths.has(layerId)) {
+    try {
+      widths.set(layerId, (map as any).getPaintProperty(layerId, 'line-width'))
+    } catch {
+      widths.set(layerId, undefined)
+    }
+  }
+  return widths.get(layerId)
+}
+
+function scaledLineWidth(original: unknown, scale: number) {
+  if (typeof original === 'number') return original * scale
+  if (Array.isArray(original)) return ['*', original, scale]
+  return original
+}
 
 function layerFingerprint(layer: any) {
   return `${layer.id ?? ''} ${layer['source-layer'] ?? ''}`.toLowerCase()
@@ -231,10 +259,21 @@ export function applyMapDesign(map: Map, theme: MapTheme, visibility: LayerVisib
     }
 
     if (layer.type === 'line') {
-      if (isRailway(layer)) setPaintSafe(map, id, 'line-color', theme.railways)
-      else if (isBoundary(layer)) setPaintSafe(map, id, 'line-color', theme.boundaries)
-      else if (isMinorRoad(layer)) setPaintSafe(map, id, 'line-color', theme.minorRoads)
-      else if (isRoad(layer)) setPaintSafe(map, id, 'line-color', theme.roads)
+      if (isRailway(layer)) {
+        setPaintSafe(map, id, 'line-color', theme.railways)
+      } else if (isBoundary(layer)) {
+        setPaintSafe(map, id, 'line-color', theme.boundaries)
+      } else if (isMinorRoad(layer)) {
+        setPaintSafe(map, id, 'line-color', theme.minorRoads)
+        const baseWidth = getOriginalLineWidth(map, id)
+        const width = scaledLineWidth(baseWidth, theme.minorRoadWidthScale)
+        if (width !== undefined) setPaintSafe(map, id, 'line-width', width)
+      } else if (isRoad(layer)) {
+        setPaintSafe(map, id, 'line-color', theme.roads)
+        const baseWidth = getOriginalLineWidth(map, id)
+        const width = scaledLineWidth(baseWidth, theme.roadWidthScale)
+        if (width !== undefined) setPaintSafe(map, id, 'line-width', width)
+      }
     }
 
     if (layer.type === 'symbol') {
@@ -338,7 +377,7 @@ function downloadDataUrl(dataUrl: string, filename: string) {
   anchor.remove()
 }
 
-export async function exportMapPng(args: {
+type ExportMapArgs = {
   filename: string
   size: PrintSize
   camera: CameraState
@@ -346,7 +385,9 @@ export async function exportMapPng(args: {
   theme: MapTheme
   visibility: LayerVisibility
   featuredPlaces: FeaturedPlace[]
-}) {
+}
+
+async function renderMapCanvas(args: ExportMapArgs) {
   const { width, height } = totalPrintPixels(args.size)
   if (width > 8192 || height > 8192 || width * height > 45_000_000) {
     throw new Error(`Export is ${width} × ${height}px. Reduce the DPI or physical size for this browser export.`)
@@ -404,11 +445,29 @@ export async function exportMapPng(args: {
     const ctx = output.getContext('2d')
     if (!ctx) throw new Error('Could not create the export canvas.')
     ctx.drawImage(exportMap.getCanvas(), 0, 0, width, height)
-
-    const dataUrl = output.toDataURL('image/png')
-    downloadDataUrl(dataUrl, args.filename)
+    return output
   } finally {
     exportMap.remove()
     host.remove()
+  }
+}
+
+export async function exportMapPng(args: ExportMapArgs) {
+  const output = await renderMapCanvas(args)
+  downloadDataUrl(output.toDataURL('image/png'), args.filename)
+}
+
+export async function exportMapSvg(args: ExportMapArgs) {
+  const output = await renderMapCanvas(args)
+  const widthMm = args.size.widthMm + args.size.bleedMm * 2
+  const heightMm = args.size.heightMm + args.size.bleedMm * 2
+  const raster = output.toDataURL('image/png')
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${output.width} ${output.height}" preserveAspectRatio="none"><image href="${raster}" xlink:href="${raster}" x="0" y="0" width="${output.width}" height="${output.height}" preserveAspectRatio="none"/></svg>`
+  const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  try {
+    downloadDataUrl(url, args.filename)
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 }
