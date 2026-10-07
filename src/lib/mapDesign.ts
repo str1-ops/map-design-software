@@ -4,9 +4,6 @@ export const BASE_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty'
 export const FEATURED_SOURCE_ID = 'strictons-featured-places'
 export const FEATURED_DOT_LAYER_ID = 'strictons-featured-dots'
 export const FEATURED_LABEL_LAYER_ID = 'strictons-featured-labels'
-export const ROAD_MINOR_LAYER_ID = 'strictons-road-minor'
-export const ROAD_MAJOR_LAYER_ID = 'strictons-road-major'
-export const ROAD_HIGHWAY_LAYER_ID = 'strictons-road-highway'
 
 export type MapTheme = {
   land: string
@@ -300,120 +297,6 @@ function setLayoutSafe(map: Map, layerId: string, property: string, value: unkno
   }
 }
 
-function firstBaseLabelLayer(map: Map) {
-  const layers = (map.getStyle() as StyleSpecification | undefined)?.layers as any[] | undefined
-  return layers?.find((layer) => layer.type === 'symbol' && !layer.id?.startsWith('strictons-'))?.id
-}
-
-function ensureRoadLayers(map: Map, theme: MapTheme, visibility: LayerVisibility) {
-  if (!map.getSource('openmaptiles')) return
-  const beforeId = firstBaseLabelLayer(map)
-
-  if (!map.getLayer(ROAD_MINOR_LAYER_ID)) {
-    map.addLayer({
-      id: ROAD_MINOR_LAYER_ID,
-      type: 'line',
-      source: 'openmaptiles',
-      'source-layer': 'transportation',
-      filter: [
-        'all',
-        ['==', ['geometry-type'], 'LineString'],
-        ['match', ['get', 'class'], ['minor', 'service', 'track', 'path'], true, false],
-      ],
-      layout: { 'line-cap': 'round', 'line-join': 'round' },
-      paint: {
-        'line-color': theme.minorRoads,
-        'line-width': [
-          '*',
-          ['interpolate', ['exponential', 1.2], ['zoom'], 11, 0.25, 13, 0.8, 14, 2.2, 20, 14],
-          theme.minorRoadWidthScale,
-        ],
-        'line-opacity': ['interpolate', ['linear'], ['zoom'], 9, 0.35, 11, 0.8, 13, 1],
-      },
-    } as any, beforeId)
-  }
-
-  if (!map.getLayer(ROAD_MAJOR_LAYER_ID)) {
-    map.addLayer({
-      id: ROAD_MAJOR_LAYER_ID,
-      type: 'line',
-      source: 'openmaptiles',
-      'source-layer': 'transportation',
-      filter: [
-        'all',
-        ['==', ['geometry-type'], 'LineString'],
-        ['match', ['get', 'class'], ['primary', 'secondary', 'tertiary'], true, false],
-        ['!', highwayClassExpression()],
-      ],
-      layout: { 'line-cap': 'round', 'line-join': 'round' },
-      paint: {
-        'line-color': theme.roads,
-        'line-width': [
-          '*',
-          [
-            'case',
-            ['==', ['get', 'class'], 'primary'],
-            ['interpolate', ['exponential', 1.2], ['zoom'], 5, 0.35, 7, 1, 20, 18],
-            ['interpolate', ['exponential', 1.2], ['zoom'], 6.5, 0.2, 8, 0.65, 20, 13],
-          ],
-          theme.roadWidthScale,
-        ],
-      },
-    } as any, beforeId)
-  }
-
-  if (!map.getLayer(ROAD_HIGHWAY_LAYER_ID)) {
-    map.addLayer({
-      id: ROAD_HIGHWAY_LAYER_ID,
-      type: 'line',
-      source: 'openmaptiles',
-      'source-layer': 'transportation',
-      filter: [
-        'all',
-        ['==', ['geometry-type'], 'LineString'],
-        highwayClassExpression(),
-      ],
-      layout: { 'line-cap': 'round', 'line-join': 'round' },
-      paint: {
-        'line-color': theme.highways,
-        'line-width': [
-          '*',
-          ['interpolate', ['exponential', 1.2], ['zoom'], 5, 0.5, 7, 1.2, 20, 18],
-          theme.highwayWidthScale,
-        ],
-      },
-    } as any, beforeId)
-  }
-
-  setPaintSafe(map, ROAD_MINOR_LAYER_ID, 'line-color', theme.minorRoads)
-  setPaintSafe(map, ROAD_MINOR_LAYER_ID, 'line-width', [
-    '*',
-    ['interpolate', ['exponential', 1.2], ['zoom'], 11, 0.25, 13, 0.8, 14, 2.2, 20, 14],
-    theme.minorRoadWidthScale,
-  ])
-  setPaintSafe(map, ROAD_MAJOR_LAYER_ID, 'line-color', theme.roads)
-  setPaintSafe(map, ROAD_MAJOR_LAYER_ID, 'line-width', [
-    '*',
-    [
-      'case',
-      ['==', ['get', 'class'], 'primary'],
-      ['interpolate', ['exponential', 1.2], ['zoom'], 5, 0.35, 7, 1, 20, 18],
-      ['interpolate', ['exponential', 1.2], ['zoom'], 6.5, 0.2, 8, 0.65, 20, 13],
-    ],
-    theme.roadWidthScale,
-  ])
-  setPaintSafe(map, ROAD_HIGHWAY_LAYER_ID, 'line-color', theme.highways)
-  setPaintSafe(map, ROAD_HIGHWAY_LAYER_ID, 'line-width', [
-    '*',
-    ['interpolate', ['exponential', 1.2], ['zoom'], 5, 0.5, 7, 1.2, 20, 18],
-    theme.highwayWidthScale,
-  ])
-
-  setLayoutSafe(map, ROAD_MINOR_LAYER_ID, 'visibility', visibility.roads && visibility.minorRoads ? 'visible' : 'none')
-  setLayoutSafe(map, ROAD_MAJOR_LAYER_ID, 'visibility', visibility.roads ? 'visible' : 'none')
-  setLayoutSafe(map, ROAD_HIGHWAY_LAYER_ID, 'visibility', visibility.roads ? 'visible' : 'none')
-}
-
 export function applyMapDesign(map: Map, theme: MapTheme, visibility: LayerVisibility) {
   const style = map.getStyle() as StyleSpecification | undefined
   if (!style?.layers) return
@@ -423,8 +306,7 @@ export function applyMapDesign(map: Map, theme: MapTheme, visibility: LayerVisib
     if (!id || id.startsWith('strictons-')) continue
 
     const requestedVisibility = visibilityForLayer(layer, visibility)
-    const replaceWithStrictonsRoadLayer = layer.type === 'line' && isRoad(layer) && !isRailway(layer)
-    setLayoutSafe(map, id, 'visibility', replaceWithStrictonsRoadLayer ? 'none' : (requestedVisibility ?? 'visible'))
+    setLayoutSafe(map, id, 'visibility', requestedVisibility ?? 'visible')
 
     if (layer.type === 'background') {
       setPaintSafe(map, id, 'background-color', theme.land)
@@ -442,6 +324,16 @@ export function applyMapDesign(map: Map, theme: MapTheme, visibility: LayerVisib
         setPaintSafe(map, id, 'line-color', theme.railways)
       } else if (isBoundary(layer)) {
         setPaintSafe(map, id, 'line-color', theme.boundaries)
+      } else if (isRoad(layer)) {
+        // Style each road feature by its actual OpenMapTiles class rather than
+        // classifying the whole style layer. This keeps roads visually continuous
+        // when motorway/trunk/primary/secondary classes change mid-route.
+        setPaintSafe(map, id, 'line-color', roadColourExpression(theme))
+        setLayoutSafe(map, id, 'line-cap', 'round')
+        setLayoutSafe(map, id, 'line-join', 'round')
+        const baseWidth = getOriginalLineWidth(map, id)
+        const width = scaledLineWidth(baseWidth, roadWidthScaleExpression(theme))
+        if (width !== undefined) setPaintSafe(map, id, 'line-width', width)
       }
     }
 
@@ -450,10 +342,6 @@ export function applyMapDesign(map: Map, theme: MapTheme, visibility: LayerVisib
       setPaintSafe(map, id, 'text-halo-color', theme.labelHalo)
     }
   }
-
-  // Render one continuous road system from the underlying transportation source.
-  // This avoids Liberty's per-layer zoom/class filters creating false dead ends.
-  ensureRoadLayers(map, theme, visibility)
 }
 
 function featuredGeoJson(places: FeaturedPlace[]) {
