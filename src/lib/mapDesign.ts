@@ -10,8 +10,10 @@ export type MapTheme = {
   water: string
   parks: string
   buildings: string
+  highways: string
   roads: string
   minorRoads: string
+  highwayWidthScale: number
   roadWidthScale: number
   minorRoadWidthScale: number
   railways: string
@@ -65,8 +67,10 @@ export const DEFAULT_THEME: MapTheme = {
   water: '#b9d7db',
   parks: '#d9dfc5',
   buildings: '#ded8cc',
+  highways: '#d4ad78',
   roads: '#ffffff',
   minorRoads: '#ebe7df',
+  highwayWidthScale: 1,
   roadWidthScale: 1,
   minorRoadWidthScale: 1,
   railways: '#8b8880',
@@ -87,6 +91,7 @@ export const THEME_PRESETS: Record<string, MapTheme> = {
     water: '#8fc6cf',
     parks: '#cbd8bd',
     buildings: '#e4d7c6',
+    highways: '#c99661',
     roads: '#fffaf1',
     minorRoads: '#eee5d8',
     railways: '#817a70',
@@ -100,6 +105,7 @@ export const THEME_PRESETS: Record<string, MapTheme> = {
     water: '#dbdbd7',
     parks: '#e6e5df',
     buildings: '#d3d2cd',
+    highways: '#a9a7a0',
     roads: '#ffffff',
     minorRoads: '#e7e6e1',
     railways: '#85847e',
@@ -116,6 +122,7 @@ export const THEME_PRESETS: Record<string, MapTheme> = {
     water: '#213a42',
     parks: '#273328',
     buildings: '#2d2d28',
+    highways: '#b8945b',
     roads: '#575850',
     minorRoads: '#363731',
     railways: '#9a968a',
@@ -176,6 +183,10 @@ function isBoundary(layer: any) {
 
 function isRailway(layer: any) {
   return layer.type === 'line' && includes(layerFingerprint(layer), /rail/)
+}
+
+function isHighway(layer: any) {
+  return layer.type === 'line' && includes(layerFingerprint(layer), /motorway|trunk|freeway|expressway/)
 }
 
 function isMinorRoad(layer: any) {
@@ -263,6 +274,11 @@ export function applyMapDesign(map: Map, theme: MapTheme, visibility: LayerVisib
         setPaintSafe(map, id, 'line-color', theme.railways)
       } else if (isBoundary(layer)) {
         setPaintSafe(map, id, 'line-color', theme.boundaries)
+      } else if (isHighway(layer)) {
+        setPaintSafe(map, id, 'line-color', theme.highways)
+        const baseWidth = getOriginalLineWidth(map, id)
+        const width = scaledLineWidth(baseWidth, theme.highwayWidthScale)
+        if (width !== undefined) setPaintSafe(map, id, 'line-width', width)
       } else if (isMinorRoad(layer)) {
         setPaintSafe(map, id, 'line-color', theme.minorRoads)
         const baseWidth = getOriginalLineWidth(map, id)
