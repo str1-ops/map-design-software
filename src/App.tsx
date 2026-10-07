@@ -44,8 +44,8 @@ function MapView({project,pick,onCamera,onPick,onViewport}:{project:Project;pick
   latest.current={onCamera,onPick,onViewport}
   useEffect(()=>{
     if(!host.current || mapRef.current) return
-    const map=new maplibregl.Map({container:host.current,style:BASE_STYLE_URL,center:project.camera.center,zoom:project.camera.zoom,bearing:0,pitch:0,attributionControl:{},canvasContextAttributes:{preserveDrawingBuffer:true}})
-    mapRef.current=map; map.addControl(new maplibregl.NavigationControl({visualizePitch:false}),'top-right')
+    const map=new maplibregl.Map({container:host.current,style:BASE_STYLE_URL,center:project.camera.center,zoom:project.camera.zoom,bearing:0,pitch:0,attributionControl:false,canvasContextAttributes:{preserveDrawingBuffer:true}})
+    mapRef.current=map
     const syncViewport=()=>{ map.resize(); if(host.current) latest.current.onViewport({width:host.current.clientWidth,height:host.current.clientHeight}) }
     const ro=new ResizeObserver(syncViewport); ro.observe(host.current)
     map.on('load',()=>{ syncViewport(); applyMapDesign(map,project.theme,project.visible); ensureFeaturedLayers(map,project.places,project.theme) })
@@ -58,7 +58,7 @@ function MapView({project,pick,onCamera,onPick,onViewport}:{project:Project;pick
   useEffect(()=>{ const m=mapRef.current;if(!m)return;requestAnimationFrame(()=>m.resize()) },[project.size.widthMm,project.size.heightMm,project.size.bleedMm])
   useEffect(()=>{ const m=mapRef.current;if(!m)return;const c=m.getCenter();if(Math.abs(c.lng-project.camera.center[0])>.0001||Math.abs(c.lat-project.camera.center[1])>.0001||Math.abs(m.getZoom()-project.camera.zoom)>.01)m.easeTo({center:project.camera.center,zoom:project.camera.zoom,duration:450})},[project.camera.center,project.camera.zoom])
   const tw=project.size.widthMm+project.size.bleedMm*2, th=project.size.heightMm+project.size.bleedMm*2, bx=project.size.bleedMm/tw*100, by=project.size.bleedMm/th*100
-  return <div className="paper"><div ref={host} className="map"/>{project.size.bleedMm>0&&<div className="trim" style={{inset:`${by}% ${bx}%`}}/>}<span className="size-chip">{project.size.widthMm} × {project.size.heightMm} mm</span>{pick&&<span className="pick-chip">Click a place on the map</span>}</div>
+  return <><div className="paper"><div ref={host} className="map"/>{project.size.bleedMm>0&&<div className="trim" style={{inset:`${by}% ${bx}%`}}/>}</div><div className="map-tools"><button type="button" onClick={()=>mapRef.current?.zoomIn({duration:220})} aria-label="Zoom in">+</button><button type="button" onClick={()=>mapRef.current?.zoomOut({duration:220})} aria-label="Zoom out">−</button></div><div className="canvas-meta">{project.size.widthMm} × {project.size.heightMm} mm</div>{pick&&<div className="pick-chip">Click a place on the map</div>}</>
 }
 
 async function geocode(q:string):Promise<SearchResult[]> {
@@ -108,7 +108,7 @@ export default function App(){
       </>}
       </div>
     </aside>
-    <main><div className="bar"><span>● OSM vector base · OpenFreeMap + MapLibre</span><code>{project.camera.center[1].toFixed(4)}, {project.camera.center[0].toFixed(4)} · z{project.camera.zoom.toFixed(1)}</code></div><div className="stage"><div className="canvas" style={{aspectRatio:String(ratio),width:`min(92cqw, 1000px, calc(92cqh * ${ratio}))`}}><MapView project={project} pick={pick} onCamera={c=>patch('camera',c)} onPick={add} onViewport={setViewport}/></div></div><footer><span>Drag to pan · scroll to zoom · Places controls the editorial layer</span><code>{px.width.toLocaleString()} × {px.height.toLocaleString()} px @ {project.size.dpi} dpi</code></footer></main>
+    <main><div className="bar"><span>● OSM vector base · OpenFreeMap + MapLibre</span><code>{project.camera.center[1].toFixed(4)}, {project.camera.center[0].toFixed(4)} · z{project.camera.zoom.toFixed(1)}</code></div><div className="stage"><div className="canvas" style={{aspectRatio:String(ratio),width:`min(92cqw, 1000px, calc(92cqh * ${ratio}))`}}><MapView project={project} pick={pick} onCamera={c=>patch('camera',c)} onPick={add} onViewport={setViewport}/></div></div><footer><span>Drag to pan · scroll to zoom · OpenFreeMap © OpenMapTiles · Data from OpenStreetMap</span><code>{px.width.toLocaleString()} × {px.height.toLocaleString()} px @ {project.size.dpi} dpi</code></footer></main>
     {note&&<div className="toast">{note}</div>}
   </div>
 }
