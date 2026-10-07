@@ -155,10 +155,64 @@ function getOriginalLineWidth(map: Map, layerId: string) {
   return widths.get(layerId)
 }
 
-function scaledLineWidth(original: unknown, scale: number) {
-  if (typeof original === 'number') return original * scale
-  if (Array.isArray(original)) return ['*', original, scale]
+function scaledLineWidth(original: unknown, scale: unknown) {
+  if (typeof original === 'number' && typeof scale === 'number') return original * scale
+  if (typeof original === 'number' || Array.isArray(original)) return ['*', original, scale]
   return original
+}
+
+function highwayClassExpression() {
+  return [
+    'any',
+    ['match', ['get', 'class'], ['motorway', 'trunk', 'motorway_construction', 'trunk_construction'], true, false],
+    ['==', ['get', 'expressway'], 1],
+  ]
+}
+
+function majorRoadClassExpression() {
+  return [
+    'match',
+    ['get', 'class'],
+    ['primary', 'secondary', 'tertiary', 'primary_construction', 'secondary_construction', 'tertiary_construction', 'link'],
+    true,
+    false,
+  ]
+}
+
+function minorRoadClassExpression() {
+  return [
+    'match',
+    ['get', 'class'],
+    ['minor', 'service', 'track', 'path', 'minor_construction', 'service_construction', 'track_construction', 'path_construction'],
+    true,
+    false,
+  ]
+}
+
+function roadColourExpression(theme: MapTheme) {
+  return [
+    'case',
+    highwayClassExpression(),
+    theme.highways,
+    majorRoadClassExpression(),
+    theme.roads,
+    minorRoadClassExpression(),
+    theme.minorRoads,
+    theme.roads,
+  ]
+}
+
+function roadWidthScaleExpression(theme: MapTheme) {
+  return [
+    'case',
+    highwayClassExpression(),
+    theme.highwayWidthScale,
+    majorRoadClassExpression(),
+    theme.roadWidthScale,
+    minorRoadClassExpression(),
+    theme.minorRoadWidthScale,
+    theme.roadWidthScale,
+  ]
 }
 
 function layerFingerprint(layer: any) {
@@ -185,16 +239,12 @@ function isRailway(layer: any) {
   return layer.type === 'line' && includes(layerFingerprint(layer), /rail/)
 }
 
-function isHighway(layer: any) {
-  return layer.type === 'line' && includes(layerFingerprint(layer), /motorway|trunk|freeway|expressway/)
-}
-
 function isMinorRoad(layer: any) {
   return layer.type === 'line' && includes(layerFingerprint(layer), /minor|residential|service|path|track|foot|cycle|pedestrian/)
 }
 
 function isRoad(layer: any) {
-  return layer.type === 'line' && includes(layerFingerprint(layer), /road|street|highway|motorway|trunk|primary|secondary|tertiary|transportation|bridge|tunnel|path|track/)
+  return layer.type === 'line' && includes(layerFingerprint(layer), /road|street|highway|motorway|trunk|primary|secondary|tertiary|minor|service|bridge|tunnel|path|track|link/)
 }
 
 function isPoiLabel(layer: any) {
@@ -274,20 +324,15 @@ export function applyMapDesign(map: Map, theme: MapTheme, visibility: LayerVisib
         setPaintSafe(map, id, 'line-color', theme.railways)
       } else if (isBoundary(layer)) {
         setPaintSafe(map, id, 'line-color', theme.boundaries)
-      } else if (isHighway(layer)) {
-        setPaintSafe(map, id, 'line-color', theme.highways)
-        const baseWidth = getOriginalLineWidth(map, id)
-        const width = scaledLineWidth(baseWidth, theme.highwayWidthScale)
-        if (width !== undefined) setPaintSafe(map, id, 'line-width', width)
-      } else if (isMinorRoad(layer)) {
-        setPaintSafe(map, id, 'line-color', theme.minorRoads)
-        const baseWidth = getOriginalLineWidth(map, id)
-        const width = scaledLineWidth(baseWidth, theme.minorRoadWidthScale)
-        if (width !== undefined) setPaintSafe(map, id, 'line-width', width)
       } else if (isRoad(layer)) {
-        setPaintSafe(map, id, 'line-color', theme.roads)
+        // Style each road feature by its actual OpenMapTiles class rather than
+        // classifying the whole style layer. This keeps roads visually continuous
+        // when motorway/trunk/primary/secondary classes change mid-route.
+        setPaintSafe(map, id, 'line-color', roadColourExpression(theme))
+        setLayoutSafe(map, id, 'line-cap', 'round')
+        setLayoutSafe(map, id, 'line-join', 'round')
         const baseWidth = getOriginalLineWidth(map, id)
-        const width = scaledLineWidth(baseWidth, theme.roadWidthScale)
+        const width = scaledLineWidth(baseWidth, roadWidthScaleExpression(theme))
         if (width !== undefined) setPaintSafe(map, id, 'line-width', width)
       }
     }
