@@ -130,12 +130,12 @@ export const THEME_PRESETS: Record<string, MapTheme> = {
 
 const includes = (value: string, pattern: RegExp) => pattern.test(value.toLowerCase())
 
-const originalLineWidths = new WeakMap<Map, Map<string, unknown>>()
+const originalLineWidths = new WeakMap<Map, globalThis.Map<string, unknown>>()
 
 function getOriginalLineWidth(map: Map, layerId: string) {
   let widths = originalLineWidths.get(map)
   if (!widths) {
-    widths = new Map<string, unknown>()
+    widths = new globalThis.Map<string, unknown>()
     originalLineWidths.set(map, widths)
   }
   if (!widths.has(layerId)) {
