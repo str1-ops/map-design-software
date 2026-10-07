@@ -155,10 +155,46 @@ function getOriginalLineWidth(map: Map, layerId: string) {
   return widths.get(layerId)
 }
 
-function scaledLineWidth(original: unknown, scale: unknown) {
-  if (typeof original === 'number' && typeof scale === 'number') return original * scale
-  if (typeof original === 'number' || Array.isArray(original)) return ['*', original, scale]
-  return original
+function scaledLineWidth(original: unknown, scale: unknown): unknown {
+  const scaledValue = (value: unknown) => {
+    if (typeof value === 'number' && typeof scale === 'number') return value * scale
+    if (typeof value === 'number') return ['*', value, scale]
+    return value
+  }
+
+  if (typeof original === 'number') return scaledValue(original)
+  if (!Array.isArray(original)) return original
+
+  // MapLibre requires ["zoom"] to remain directly inside a top-level
+  // interpolate/step expression. Scale each stop output instead of wrapping
+  // the whole camera expression in ["*", ...].
+  if (
+    original[0] === 'interpolate' &&
+    Array.isArray(original[2]) &&
+    original[2][0] === 'zoom'
+  ) {
+    const result: unknown[] = [original[0], original[1], original[2]]
+    for (let i = 3; i < original.length; i += 2) {
+      result.push(original[i], scaledValue(original[i + 1]))
+    }
+    return result
+  }
+
+  if (
+    original[0] === 'step' &&
+    Array.isArray(original[1]) &&
+    original[1][0] === 'zoom'
+  ) {
+    const result: unknown[] = [original[0], original[1], scaledValue(original[2])]
+    for (let i = 3; i < original.length; i += 2) {
+      result.push(original[i], scaledValue(original[i + 1]))
+    }
+    return result
+  }
+
+  // Expressions without camera/zoom input can be multiplied directly.
+  const hasZoom = JSON.stringify(original).includes('"zoom"')
+  return hasZoom ? original : ['*', original, scale]
 }
 
 function highwayClassExpression() {
