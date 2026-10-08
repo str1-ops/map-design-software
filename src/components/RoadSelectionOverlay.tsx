@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { KeyboardEvent, MouseEvent, PointerEvent } from 'react'
 import type { Map } from 'maplibre-gl'
-import type { SelectedRoad } from './roadChoices'
+import type { SelectedRoad } from '../lib/roadChoices'
 
 type View = { width:number; height:number; revision:number }
 type Props = {
