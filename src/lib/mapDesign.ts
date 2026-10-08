@@ -1,6 +1,6 @@
 import type { Map, StyleSpecification } from 'maplibre-gl'
 import { ensureRoadRepairLayers, type RoadRepair } from './roadRepairs'
-import { ensureRoadChoiceLayers, type RoadOverride } from './roadChoices'
+import { ensureRoadChoiceLayers, visibleRoadAppearance, type RoadOverride } from './roadChoices'
 
 export const BASE_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty'
 export const FEATURED_SOURCE_ID = 'strictons-featured-places'
@@ -641,6 +641,32 @@ async function renderMapCanvas(args: ExportMapArgs) {
     const ctx = output.getContext('2d')
     if (!ctx) throw new Error('Could not create the export canvas.')
     ctx.drawImage(exportMap.getCanvas(), 0, 0, width, height)
+
+    // Composite the same deliberate road inclusions shown in the live preview.
+    // Source vector roads may be completely absent from low-zoom tile styles.
+    if(args.visibility.roads){
+      ctx.save()
+      ctx.scale(width/logicalWidth,height/logicalHeight)
+      ctx.lineCap='round'
+      ctx.lineJoin='round'
+      for(const choice of args.roadChoices){
+        if(choice.mode!=='show'||choice.coordinates.length<2)continue
+        const appearance=visibleRoadAppearance(args.theme,choice.category,exportMap.getZoom())
+        ctx.beginPath()
+        choice.coordinates.forEach((coordinate,index)=>{
+          const p=exportMap.project(coordinate)
+          if(index===0)ctx.moveTo(p.x,p.y)
+          else ctx.lineTo(p.x,p.y)
+        })
+        ctx.strokeStyle=appearance.casing
+        ctx.lineWidth=appearance.casingWidth
+        ctx.stroke()
+        ctx.strokeStyle=appearance.colour
+        ctx.lineWidth=appearance.width
+        ctx.stroke()
+      }
+      ctx.restore()
+    }
     return output
   } finally {
     exportMap.remove()
@@ -1494,16 +1520,13 @@ export async function exportMapSvg(args: ExportSvgArgs) {
       roads.set(key,road)
     }
     const number=++road.count
-    const widthScale=choice.category==='Highways'?args.theme.highwayWidthScale:
-      choice.category==='Major Roads'?args.theme.roadWidthScale:args.theme.minorRoadWidthScale
-    const colour=choice.category==='Highways'?args.theme.highways:
-      choice.category==='Major Roads'?args.theme.roads:args.theme.minorRoads
-    const base=choice.category==='Highways'?2.4:choice.category==='Major Roads'?1.6:0.85
+    const appearance=visibleRoadAppearance(args.theme,choice.category,map.getZoom())
+    const pathId=svgId('Always Show '+choice.name)+'_'+String(number).padStart(2,'0')+'_'+(++objectNumber)
     road.items.push(
-      '<path id="'+svgId('Always Show '+choice.name)+'_'+String(number).padStart(2,'0')+'_'+(++objectNumber)+
-      '" data-name="'+escapeXml(choice.name)+' (always show)" data-road-class="'+escapeXml(choice.roadClass)+
-      '" d="'+d+'" fill="none" stroke="'+escapeXml(colour)+'" stroke-width="'+Math.max(0.2,base*widthScale*strokeScale).toFixed(2)+
-      '" stroke-linecap="round" stroke-linejoin="round"/>'
+      '<g id="'+pathId+'" data-name="'+escapeXml(choice.name)+' (always show)" data-road-class="'+escapeXml(choice.roadClass)+'">'+
+      '<path id="'+pathId+'_Casing" d="'+d+'" fill="none" stroke="'+escapeXml(appearance.casing)+'" stroke-width="'+(appearance.casingWidth*strokeScale).toFixed(2)+'" stroke-linecap="round" stroke-linejoin="round"/>'+
+      '<path id="'+pathId+'_Road" d="'+d+'" fill="none" stroke="'+escapeXml(appearance.colour)+'" stroke-width="'+(appearance.width*strokeScale).toFixed(2)+'" stroke-linecap="round" stroke-linejoin="round"/>'+
+      '</g>'
     )
   }
 
