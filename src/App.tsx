@@ -208,6 +208,12 @@ async function geocode(q:string):Promise<SearchResult[]> {
 
 export default function App(){
   const liveMapRef=useRef<MapLibreMap|null>(null)
+  const [locked,setLocked]=useState(false)
+  const [selecting,setSelecting]=useState(false)
+  const [selection,setSelection]=useState<RoadSelection|null>(null)
+  const [checking,setChecking]=useState(false)
+  const [lastRepairIds,setLastRepairIds]=useState<string[]>([])
+  const [repairStatus,setRepairStatus]=useState('')
   const [project,setProject]=useState<Project>(()=>load()), [tab,setTab]=useState<'document'|'style'|'places'>('document'), [pick,setPick]=useState(false)
   const [query,setQuery]=useState(''),[results,setResults]=useState<SearchResult[]>([]),[busy,setBusy]=useState(false),[note,setNote]=useState(''),[viewport,setViewport]=useState({width:0,height:0})
   const px=useMemo(()=>totalPrintPixels(project.size),[project.size]), ratio=(project.size.widthMm+project.size.bleedMm*2)/(project.size.heightMm+project.size.bleedMm*2)
@@ -218,18 +224,53 @@ export default function App(){
   const theme=<K extends keyof MapTheme>(key:K,value:MapTheme[K])=>setProject(p=>({...p,theme:{...p.theme,[key]:value}}))
   const visible=(key:keyof LayerVisibility,value:boolean)=>setProject(p=>({...p,visible:{...p.visible,[key]:value}}))
   const search=async(e:FormEvent)=>{e.preventDefault();if(!query.trim())return;setBusy(true);try{const r=await geocode(query.trim());setResults(r);if(!r.length)setNote('No places found')}catch(err){setNote(err instanceof Error?err.message:'Search failed')}finally{setBusy(false)}}
-  const go=(r:SearchResult)=>{patch('camera',{...project.camera,center:[Number(r.lon),Number(r.lat)],zoom:r.type==='city'||r.type==='town'?12:14});setResults([])}
+  const go=(r:SearchResult)=>{if(locked){setNote('Return to canvas before changing location.');return}patch('camera',{...project.camera,center:[Number(r.lon),Number(r.lat)],zoom:r.type==='city'||r.type==='town'?12:14});setResults([])}
   const add=(p:FeaturedPlace)=>{patch('places',[...project.places,p]);setPick(false);setTab('places')}
-  const exportPng=async()=>{setBusy(true);try{await exportMapPng({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.png`,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places});setNote('Print PNG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
-  const exportSvg=async()=>{setBusy(true);try{const map=liveMapRef.current;if(!map)throw new Error('The live map is not ready yet.');await exportMapSvg({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.svg`,map,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places});setNote('Editable SVG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
+  const lockCanvas=()=>{setLocked(true);setPick(false);setSelection(null);setSelecting(false);setRepairStatus('Saved print view locked. Pan and zoom in to inspect roads.')}
+  const returnToCanvas=()=>{
+    setSelecting(false);setSelection(null);setLocked(false)
+    const map=liveMapRef.current
+    if(map)map.jumpTo({center:project.camera.center,zoom:project.camera.zoom,bearing:project.camera.bearing,pitch:project.camera.pitch})
+    setRepairStatus('Returned to the saved print view.')
+  }
+  const checkRepair=async()=>{
+    const map=liveMapRef.current
+    if(!locked||!selection||!map)return
+    setChecking(true)
+    setRepairStatus('Checking loaded road geometry against visible roads...')
+    try{
+      const result=await findRoadRepairs(map,selection,project.visible,project.repairs)
+      if(result.repairs.length){
+        const items=result.repairs
+        setProject((previous)=>({...previous,repairs:[...previous.repairs,...items]}))
+        setLastRepairIds(items.map((item)=>item.id))
+      }
+      setRepairStatus(result.reason || (result.repairs.length?
+        'Restored '+result.repairs.length+' mapped road segment(s) from source data.':
+        'No supported missing connections found here. Try zooming closer or selecting a wider gap.'))
+    }catch(err){
+      setRepairStatus(err instanceof Error?err.message:'Unable to check this area.')
+    }finally{
+      setChecking(false);setSelection(null)
+    }
+  }
+  const undoRepairs=()=>{
+    if(!lastRepairIds.length)return
+    const ids=new Set(lastRepairIds)
+    setProject((previous)=>({...previous,repairs:previous.repairs.filter((repair)=>!ids.has(repair.id))}))
+    setLastRepairIds([])
+    setRepairStatus('Last repair batch undone.')
+  }
+  const exportPng=async()=>{setBusy(true);try{await exportMapPng({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.png`,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places,repairs:project.repairs});setNote('Print PNG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
+  const exportSvg=async()=>{setBusy(true);try{const map=liveMapRef.current;if(!map)throw new Error('The live map is not ready yet.');await exportMapSvg({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.svg`,map,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places,repairs:project.repairs});setNote('Editable SVG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
   return <div className="shell">
     <header><b>STRictons <small>MAP STUDIO</small></b><input value={project.name} onChange={e=>patch('name',e.target.value)}/><div className="export-actions"><button onClick={exportPng} disabled={busy}>↓ PNG</button><button onClick={exportSvg} disabled={busy}>↓ SVG</button></div></header>
     <aside>
       <nav>{(['document','style','places'] as const).map(x=><button className={tab===x?'on':''} onClick={()=>setTab(x)} key={x}>{x}</button>)}</nav>
       <div className="panel">
       {tab==='document'&&<>
-        <h3>Canvas <em>physical print size</em></h3><div className="presets">{PRESETS.map(([n,w,h])=><button key={n} className={project.size.widthMm===w&&project.size.heightMm===h?'on':''} onClick={()=>setProject(p=>({...p,size:{...p.size,widthMm:w,heightMm:h}}))}><b>{n}</b><small>{w} × {h} mm</small></button>)}</div>
-        <div className="grid"><label>Width<input type="number" value={project.size.widthMm} onChange={e=>size('widthMm',+e.target.value)}/></label><label>Height<input type="number" value={project.size.heightMm} onChange={e=>size('heightMm',+e.target.value)}/></label><label>Bleed<input type="number" value={project.size.bleedMm} onChange={e=>size('bleedMm',+e.target.value)}/></label><label>DPI<select value={project.size.dpi} onChange={e=>size('dpi',+e.target.value)}><option>150</option><option>200</option><option>300</option></select></label></div>
+        <h3>Canvas <em>physical print size</em></h3><div className="presets">{PRESETS.map(([n,w,h])=><button key={n} disabled={locked} className={project.size.widthMm===w&&project.size.heightMm===h?'on':''} onClick={()=>setProject(p=>({...p,size:{...p.size,widthMm:w,heightMm:h}}))}><b>{n}</b><small>{w} × {h} mm</small></button>)}</div>
+        <div className="grid"><label>Width<input type="number" disabled={locked} value={project.size.widthMm} onChange={e=>size('widthMm',+e.target.value)}/></label><label>Height<input type="number" disabled={locked} value={project.size.heightMm} onChange={e=>size('heightMm',+e.target.value)}/></label><label>Bleed<input type="number" disabled={locked} value={project.size.bleedMm} onChange={e=>size('bleedMm',+e.target.value)}/></label><label>DPI<select disabled={locked} value={project.size.dpi} onChange={e=>size('dpi',+e.target.value)}><option>150</option><option>200</option><option>300</option></select></label></div>
         <div className="info"><small>Output canvas</small><b>{px.width.toLocaleString()} × {px.height.toLocaleString()} px</b></div>
         <h3>Location <em>OpenStreetMap search</em></h3><form onSubmit={search}><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Suburb, venue or address"/><button>⌕</button></form>{results.length>0&&<div className="results">{results.map(r=><button key={r.place_id} onClick={()=>go(r)}><b>{r.display_name.split(',')[0]}</b><small>{r.display_name}</small></button>)}</div>}<p className="help">Manual, cached Nominatim search. Configure VITE_GEOCODER_URL for production.</p>
       </>}
@@ -247,7 +288,7 @@ export default function App(){
       </>}
       </div>
     </aside>
-    <main><div className="bar"><span>● OSM vector base · OpenFreeMap + MapLibre</span><code>{project.camera.center[1].toFixed(4)}, {project.camera.center[0].toFixed(4)} · z{project.camera.zoom.toFixed(1)}</code></div><div className="stage"><div className="canvas" style={{aspectRatio:String(ratio),width:`min(92cqw, 1000px, calc(92cqh * ${ratio}))`}}><MapView project={project} pick={pick} onCamera={c=>patch('camera',c)} onPick={add} onViewport={setViewport} onMapReady={map=>{liveMapRef.current=map}}/></div></div><footer><span>Drag to pan · scroll to zoom · OpenFreeMap © OpenMapTiles · Data from OpenStreetMap</span><code>{px.width.toLocaleString()} × {px.height.toLocaleString()} px @ {project.size.dpi} dpi</code></footer></main>
+    <main><div className="bar"><div className="edit-toolbar"><span>● OSM vector base</span>{!locked?<button className="lock-action" onClick={lockCanvas}>♧ Lock canvas to edit roads</button>:<><strong>● Canvas locked</strong><button onClick={()=>{setSelecting(true);setSelection(null)}} className={selecting?'active':''}>Draw selection</button><button disabled={!selection||checking} onClick={checkRepair}>{checking?'Checking...':'Check & repair roads'}</button><button disabled={!lastRepairIds.length} onClick={undoRepairs}>Undo repair</button><button className="lock-action" onClick={returnToCanvas}>↩ Return to canvas</button></>}</div><code>{project.camera.center[1].toFixed(4)}, {project.camera.center[0].toFixed(4)} · z{project.camera.zoom.toFixed(1)}</code></div><div className="stage"><div className="canvas" style={{aspectRatio:String(ratio),width:`min(92cqw, 1000px, calc(92cqh * ${ratio}))`}}><MapView project={project} pick={pick} locked={locked} selecting={selecting} selection={selection} onCamera={c=>{if(locked){setSelection(null)}else{patch('camera',c)}}} onPick={add} onViewport={setViewport} onMapReady={map=>{liveMapRef.current=map}} onSelection={area=>{setSelection(area);setSelecting(false);if(area)setRepairStatus('Area selected. Click Check & repair roads.')}}/></div></div><footer><span>{locked ? repairStatus || 'Saved canvas locked. Inspect and select an incomplete road.' : 'Drag to pan · scroll to zoom · OpenFreeMap © OpenMapTiles · Data from OpenStreetMap'}</span><code>{px.width.toLocaleString()} × {px.height.toLocaleString()} px @ {project.size.dpi} dpi</code></footer></main>
     {note&&<div className="toast">{note}</div>}
   </div>
 }
