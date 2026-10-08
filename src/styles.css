@@ -34,3 +34,15 @@ footer>span{max-width:80%;overflow:hidden;text-overflow:ellipsis;white-space:now
 .road-choice-box label{display:flex;gap:9px;align-items:center;margin:5px 18px;border:1px solid #c8c7be;border-radius:6px;background:#faf9f5;padding:9px 10px;font-size:10px;font-weight:500;cursor:pointer}
 .road-choice-box label input{width:14px;height:14px;accent-color:#2b684b;cursor:pointer}
 .road-choice-box .road-choice-cancel{margin:6px 18px 0;border:0;background:none;text-decoration:underline;color:#736f66;font-size:9px;cursor:pointer;padding:2px}
+
+/* Local junction editor: keep attention on the blue map selection. */
+.junction-editor{margin:11px 18px 13px;border-top:1px solid #d0d4d6;padding-top:11px}
+.junction-switch{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.junction-switch button{border:1px solid #b9c3cc;background:#f7f9fa;color:#46545f;border-radius:5px;padding:9px 5px;font-size:10px;cursor:pointer}
+.junction-switch button.on{border-color:#1378ed;background:#eaf3ff;color:#075bbd;font-weight:600}
+.junction-editor .help{margin:9px 0;color:#687783}
+.junction-options{display:grid;grid-template-columns:1fr 1fr;gap:5px;max-height:172px;overflow-y:auto}
+.junction-options button{display:flex;flex-direction:column;align-items:flex-start;gap:3px;text-align:left;min-width:0;padding:8px;border-radius:5px;border:1px solid #cbd5df;background:#fff;color:#314960;font-size:9px;cursor:pointer}
+.junction-options button:hover{border-color:#1378ed;background:#f0f7ff}
+.junction-options button:disabled{opacity:.45;cursor:default}
+.junction-options button span{font-size:8px;color:#8192a2}
