@@ -733,6 +733,42 @@ function roadGroup(properties: Record<string, any>) {
   return 'Minor Roads'
 }
 
+function titleCaseRoadClass(value: unknown) {
+  const text = String(value || 'road').replace(/_/g, ' ').trim()
+  return text.replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function roadIdentity(properties: Record<string, any>, feature: any, layerId: string) {
+  const name = String(
+    properties?.name ||
+    properties?.['name:en'] ||
+    properties?.['name:latin'] ||
+    ''
+  ).trim()
+  const ref = String(
+    properties?.ref ||
+    properties?.route_ref ||
+    properties?.['ref:road'] ||
+    ''
+  ).trim()
+  const roadClass = String(properties?.class || properties?.subclass || 'road').trim()
+
+  let label = ''
+  if (name && ref && !name.toLowerCase().includes(ref.toLowerCase())) label = `${name} (${ref})`
+  else if (name) label = name
+  else if (ref) label = `Route ${ref}`
+  else label = `Unnamed ${titleCaseRoadClass(roadClass)} Road`
+
+  const fallbackId = feature?.id !== undefined && feature?.id !== null
+    ? String(feature.id)
+    : layerId
+  const key = name || ref
+    ? `${name.toLowerCase()}|${ref.toLowerCase()}|${roadClass.toLowerCase()}`
+    : `unnamed|${roadClass.toLowerCase()}|${fallbackId}`
+
+  return { label, key, roadClass }
+}
+
 function featureCategory(feature: any) {
   const layer = feature.layer || {}
   const props = feature.properties || {}
@@ -828,6 +864,10 @@ export async function exportMapSvg(args: ExportSvgArgs) {
     'Featured Labels',
   ]
   const groups = new globalThis.Map<string,string[]>(groupNames.map(name => [name, []]))
+  const roadCategories = new Set(['Minor Roads','Major Roads','Highways'])
+  const namedRoadGroups = new globalThis.Map<string, globalThis.Map<string, { label:string; roadClass:string; items:string[]; count:number }>>(
+    [...roadCategories].map((name) => [name, new globalThis.Map()])
+  )
   const seen = new Set<string>()
   const seenLabels = new Set<string>()
   let objectNumber = 0
@@ -892,9 +932,25 @@ export async function exportMapSvg(args: ExportSvgArgs) {
     const rawWidth = Number(styleValue(map, layerId, 'paint', 'line-width', properties, fallbackLineWidth(category,args.theme)))
     const opacity = Number(styleValue(map, layerId, 'paint', 'line-opacity', properties, 1))
     const strokeWidth = Math.max(0.2, (Number.isFinite(rawWidth)?rawWidth:fallbackLineWidth(category,args.theme)) * strokeScale)
-    groups.get(category)!.push(
-      `<path id="${svgId(category)}-${++objectNumber}" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${Number.isFinite(opacity)?opacity:1}" stroke-linecap="round" stroke-linejoin="round"/>`
-    )
+
+    if (roadCategories.has(category)) {
+      const identity = roadIdentity(properties, feature, layerId)
+      const categoryRoads = namedRoadGroups.get(category)!
+      let road = categoryRoads.get(identity.key)
+      if (!road) {
+        road = { label:identity.label, roadClass:identity.roadClass, items:[], count:0 }
+        categoryRoads.set(identity.key, road)
+      }
+      const segmentNumber = ++road.count
+      const segmentName = `${identity.label} - Segment ${String(segmentNumber).padStart(2,'0')}`
+      road.items.push(
+        `<path id="${svgId(identity.label)}-segment-${String(segmentNumber).padStart(2,'0')}-${++objectNumber}" data-name="${escapeXml(segmentName)}" data-road-name="${escapeXml(identity.label)}" data-road-class="${escapeXml(identity.roadClass)}" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${Number.isFinite(opacity)?opacity:1}" stroke-linecap="round" stroke-linejoin="round"/>`
+      )
+    } else {
+      groups.get(category)!.push(
+        `<path id="${svgId(category)}-${++objectNumber}" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${Number.isFinite(opacity)?opacity:1}" stroke-linecap="round" stroke-linejoin="round"/>`
+      )
+    }
   }
 
   for (const place of args.featuredPlaces) {
@@ -910,6 +966,17 @@ export async function exportMapSvg(args: ExportSvgArgs) {
   }
 
   const orderedGroups = groupNames.map((name) => {
+    if (roadCategories.has(name)) {
+      const roads = [...(namedRoadGroups.get(name)?.values() || [])]
+        .sort((a,b) => a.label.localeCompare(b.label))
+        .map((road, roadIndex) => {
+          const groupId = `${svgId(name)}-${svgId(road.label)}-${String(roadIndex + 1).padStart(2,'0')}`
+          return `<g id="${groupId}" data-name="${escapeXml(road.label)}" data-road-class="${escapeXml(road.roadClass)}">${road.items.join('')}</g>`
+        })
+        .join('')
+      return `<g id="${svgId(name)}" data-name="${escapeXml(name)}">${roads}</g>`
+    }
+
     const items = groups.get(name) || []
     return `<g id="${svgId(name)}" data-name="${escapeXml(name)}">${items.join('')}</g>`
   }).join('')
