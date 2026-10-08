@@ -597,16 +597,18 @@ function themeColour(theme:MapTheme){
   return ['match',['get','category'],'Highways',theme.highways,
     'Major Roads',theme.roads,'Minor Roads',theme.minorRoads,theme.roads] as any
 }
-function themeWidth(theme:MapTheme,extra=0){
-  const hi=Math.max(0.25,theme.highwayWidthScale)
-  const major=Math.max(0.25,theme.roadWidthScale)
-  const minor=Math.max(0.25,theme.minorRoadWidthScale)
-  const tiers=(high:number,road:number,minorRoad:number):any=>['match',['get','category'],
-    'Highways',high*hi+extra,'Major Roads',road*major+extra,'Minor Roads',minorRoad*minor+extra,1+extra]
+function themeWidth(theme:MapTheme){
+  const hi=Math.max(.25,theme.highwayWidthScale)
+  const major=Math.max(.25,theme.roadWidthScale)
+  const minor=Math.max(.25,theme.minorRoadWidthScale)
+  const tiers=(high:number,road:number,small:number):any=>
+    ['match',['get','category'],'Highways',high*hi,
+      'Major Roads',road*major,'Minor Roads',small*minor,1]
   return ['interpolate',['linear'],['zoom'],
-    9,tiers(1.8,1.2,0.65),
-    14,tiers(3.8,2.3,1.3),
-    18,tiers(6.5,4.2,2.2)
+    9,tiers(5,4.8,3.8),
+    12,tiers(8.5,7.3,5.5),
+    15,tiers(13,10.8,7.5),
+    18,tiers(19,15,10)
   ] as any
 }
 export function ensureRoadChoiceLayers(
