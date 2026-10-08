@@ -9,12 +9,13 @@ type Props = {
   road: SelectedRoad | null
   boundary: 'start' | 'end'
   onJunctionClick: (index:number)=>void
+  onRoadPointClick: (index:number)=>void
 }
 
 // This editor is deliberately independent of MapLibre style layers.
 // The selected geometry is drawn in a normal SVG above the canvas; no
 // tile/style refresh can hide the highlight or intercept junction clicks.
-export default function RoadSelectionOverlay({map,road,boundary,onJunctionClick}:Props){
+export default function RoadSelectionOverlay({map,road,boundary,onJunctionClick,onRoadPointClick}:Props){
   const [view,setView]=useState<View>({width:1,height:1,revision:0})
   useEffect(()=>{
     if(!map)return
@@ -69,6 +70,7 @@ export default function RoadSelectionOverlay({map,road,boundary,onJunctionClick}
     return {
       route:path(points),
       selected:path(selected),
+      routePoints:points,
       markers:validMarkers.filter(j=>nearby.has(j.index)).map(junction=>({
         ...junction,x:points[junction.index].x,y:points[junction.index].y,
         selected: junction.index===road.startIndex||junction.index===road.endIndex,
@@ -86,7 +88,23 @@ export default function RoadSelectionOverlay({map,road,boundary,onJunctionClick}
   }
   const stopPointer=(event:PointerEvent<SVGGElement>)=>{
     event.stopPropagation()
-    event.preventDefault()
+  }
+  const chooseRoadPoint=(event:MouseEvent<SVGPathElement>)=>{
+    event.stopPropagation()
+    const svg=event.currentTarget.ownerSVGElement
+    if(!svg)return
+    const bounds=svg.getBoundingClientRect()
+    if(!bounds.width||!bounds.height)return
+    const x=(event.clientX-bounds.left)*view.width/bounds.width
+    const y=(event.clientY-bounds.top)*view.height/bounds.height
+    let nearest=-1
+    let distance=Infinity
+    for(let i=0;i<projected.routePoints.length;i++){
+      const p=projected.routePoints[i]
+      const d=Math.hypot(p.x-x,p.y-y)
+      if(d<distance){distance=d;nearest=i}
+    }
+    if(nearest>=0)onRoadPointClick(nearest)
   }
   return <svg className="road-selection-overlay"
     viewBox={`0 0 ${view.width} ${view.height}`}
@@ -95,6 +113,10 @@ export default function RoadSelectionOverlay({map,road,boundary,onJunctionClick}
     <path className="road-editor-route" d={projected.route}/>
     <path className="road-editor-outline" d={projected.selected}/>
     <path className="road-editor-line" d={projected.selected}/>
+    <path className="road-editor-interaction" d={projected.route}
+      aria-label={`Click the road line to move the ${boundary} endpoint`}
+      onPointerDown={event=>event.stopPropagation()}
+      onClick={chooseRoadPoint}/>
     {projected.markers.map(marker=>{
       const label=marker.active?`Current ${boundary} of selection`:
         `${marker.kind==='intersection'?'Junction':'Road endpoint'}: move ${boundary} here`
