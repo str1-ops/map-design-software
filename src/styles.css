@@ -121,3 +121,13 @@ footer>span{max-width:80%;overflow:hidden;text-overflow:ellipsis;white-space:now
   fill:#fff;
   pointer-events:none;
 }
+
+.road-editor-interaction{
+  fill:none;
+  stroke:transparent;
+  stroke-width:27;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+  pointer-events:stroke;
+  cursor:crosshair;
+}
