@@ -9,7 +9,7 @@ import {
   type MapTheme, type PrintSize,
 } from './lib/mapDesign'
 import { ensureRoadRepairLayers, findRoadRepairs, type RoadSelection, type RoadRepair } from './lib/roadRepairs'
-import { ensureRoadChoiceLayers, selectRoadAt, type RoadOverride, type SelectedRoad } from './lib/roadChoices'
+import { ensureRoadChoiceLayers, selectRoadAt, adjustRoadSelection, JUNCTION_HIT_LAYER, type RoadOverride, type SelectedRoad } from './lib/roadChoices'
 
 maplibregl.setWorkerUrl(workerUrl)
 
@@ -41,7 +41,7 @@ function Colour({label,value,onChange}:{label:string;value:string;onChange:(v:st
   return <label className="colour"><span>{label}</span><div><input type="color" value={value} onChange={e=>onChange(e.target.value)}/><code>{value.toUpperCase()}</code></div></label>
 }
 
-function MapView({project,pick,locked,selecting,selection,roadPicking,selectedRoad,onCamera,onPick,onViewport,onMapReady,onSelection,onRoadClick}:{
+function MapView({project,pick,locked,selecting,selection,roadPicking,selectedRoad,onCamera,onPick,onViewport,onMapReady,onSelection,onRoadClick,onJunctionClick}:{
   project:Project;pick:boolean;locked:boolean;selecting:boolean;selection:RoadSelection|null;
   roadPicking:boolean;selectedRoad:SelectedRoad|null;
   onCamera:(c:CameraState)=>void;onPick:(p:FeaturedPlace)=>void;
@@ -49,12 +49,13 @@ function MapView({project,pick,locked,selecting,selection,roadPicking,selectedRo
   onMapReady:(map:MapLibreMap|null)=>void;
   onSelection:(area:RoadSelection|null)=>void
   onRoadClick:(candidate:SelectedRoad|null)=>void
+  onJunctionClick:(index:number)=>void
 }){
   const host=useRef<HTMLDivElement>(null),mapRef=useRef<MapLibreMap|null>(null)
   // Read the current selection mode from a ref, not from canvas data attributes.
   // The MapLibre map and its click listener are only created once.
-  const latest=useRef({onCamera,onPick,onViewport,onMapReady,onSelection,onRoadClick,roadPicking,pick})
-  latest.current={onCamera,onPick,onViewport,onMapReady,onSelection,onRoadClick,roadPicking,pick}
+  const latest=useRef({onCamera,onPick,onViewport,onMapReady,onSelection,onRoadClick,onJunctionClick,roadPicking,pick,selectedRoad})
+  latest.current={onCamera,onPick,onViewport,onMapReady,onSelection,onRoadClick,onJunctionClick,roadPicking,pick,selectedRoad}
   const pointerStart=useRef<{x:number;y:number}|null>(null)
   const [drag,setDrag]=useState<{left:number;top:number;width:number;height:number}|null>(null)
 
@@ -86,6 +87,18 @@ function MapView({project,pick,locked,selecting,selection,roadPicking,selectedRo
     })
     map.on('click',e=>{
       if(latest.current.roadPicking){
+        // Check editable junction handles first; otherwise clicking a handle
+        // would simply start another road selection underneath it.
+        if(latest.current.selectedRoad && map.getLayer(JUNCTION_HIT_LAYER)){
+          try{
+            const hits=map.queryRenderedFeatures(e.point,{layers:[JUNCTION_HIT_LAYER]})
+            const index=Number(hits[0]?.properties?.index)
+            if(hits.length && Number.isInteger(index)){
+              latest.current.onJunctionClick(index)
+              return
+            }
+          }catch{/* selection marker tiles may still be updating */}
+        }
         latest.current.onRoadClick(selectRoadAt(map,{x:e.point.x,y:e.point.y}))
         return
       }
@@ -207,7 +220,7 @@ function MapView({project,pick,locked,selecting,selection,roadPicking,selectedRo
     <div className="canvas-meta">{project.size.widthMm} × {project.size.heightMm} mm{locked?' · Saved canvas locked':''}</div>
     {pick&&<div className="pick-chip">Click a place on the map</div>}
     {selecting&&<div className="pick-chip">Drag a rectangle around the incomplete roads</div>}
-    {roadPicking&&!selecting&&<div className="pick-chip">Click a road to select one section, then choose Show or Hide</div>}
+    {roadPicking&&!selecting&&<div className="pick-chip">{selectedRoad?'Blue road is selected. Click a junction dot to adjust '+editingBoundary+'.':'Click a road to highlight it blue, then adjust junctions or choose Show / Hide.'}</div>}
   </>
 }
 
@@ -227,6 +240,7 @@ export default function App(){
   const [checking,setChecking]=useState(false)
   const [roadPicking,setRoadPicking]=useState(true)
   const [selectedRoad,setSelectedRoad]=useState<SelectedRoad|null>(null)
+  const [editingBoundary,setEditingBoundary]=useState<'start'|'end'>('end')
   const [lastRepairIds,setLastRepairIds]=useState<string[]>([])
   const [repairStatus,setRepairStatus]=useState('')
   const [project,setProject]=useState<Project>(()=>load()), [tab,setTab]=useState<'document'|'style'|'places'>('document'), [pick,setPick]=useState(false)
@@ -262,6 +276,16 @@ export default function App(){
     setLocked(false);setRoadPicking(false)
     setRepairStatus('Canvas unlocked. You can resize or reposition your saved map.')
   }
+  const changeRoadJunction=(index:number)=>{
+    if(!selectedRoad)return
+    const updated=adjustRoadSelection(selectedRoad,editingBoundary,index)
+    if(!updated){
+      setRepairStatus('Choose a junction that keeps the start before the end of the road.')
+      return
+    }
+    setSelectedRoad(updated)
+    setRepairStatus((editingBoundary==='start'?'Start':'End')+' moved to the selected junction. Review the blue section before saving.')
+  }
   const chooseRoad=(choice:'show'|'hide')=>{
     if(!selectedRoad)return
     const coords=selectedRoad.coordinates
@@ -274,7 +298,10 @@ export default function App(){
         const back=[...item.coordinates].reverse().map(point=>point.map(v=>v.toFixed(7)).join(',')).join(';')
         return (f<back?f:back)!==canonical
       })
-      return {...p,roadChoices:[...cleaned,{...selectedRoad,id:crypto.randomUUID(),mode:choice}]}
+      return {...p,roadChoices:[...cleaned,{
+        id:crypto.randomUUID(),name:selectedRoad.name,roadClass:selectedRoad.roadClass,
+        category:selectedRoad.category,coordinates:selectedRoad.coordinates,mode:choice
+      }]}
     })
     setRepairStatus((choice==='show'?'Always show':'Hide')+' applied to '+selectedRoad.name+'. Select another section or return to canvas.')
     setSelectedRoad(null)
@@ -324,6 +351,22 @@ export default function App(){
           <h3>Selected road section <em>junction to junction</em></h3>
           {selectedRoad?<><p className="road-choice-name">{selectedRoad.name}</p>
             <p className="help">{selectedRoad.category} · {selectedRoad.selectionHint}</p>
+            <div className="junction-editor">
+              <div className="junction-switch">
+                <button type="button" className={editingBoundary==='start'?'on':''} aria-pressed={editingBoundary==='start'} onClick={()=>setEditingBoundary('start')}>Adjust start</button>
+                <button type="button" className={editingBoundary==='end'?'on':''} aria-pressed={editingBoundary==='end'} onClick={()=>setEditingBoundary('end')}>Adjust end</button>
+              </div>
+              <p className="help">The selected section is blue. Click a blue junction dot on the map to move the {editingBoundary}, or choose a junction below.</p>
+              <div className="junction-options">{selectedRoad.junctions
+                .filter(point=>editingBoundary==='start'?point.index<selectedRoad.endIndex:point.index>selectedRoad.startIndex)
+                .sort((a,b)=>Math.abs(a.index-(editingBoundary==='start'?selectedRoad.startIndex:selectedRoad.endIndex))-Math.abs(b.index-(editingBoundary==='start'?selectedRoad.startIndex:selectedRoad.endIndex)))
+                .slice(0,9).map((point,index)=><button type="button" key={point.index}
+                  disabled={point.index===(editingBoundary==='start'?selectedRoad.startIndex:selectedRoad.endIndex)}
+                  onClick={()=>changeRoadJunction(point.index)}>
+                  {point.kind==='intersection'?'Junction':'Road boundary'} {index+1}
+                  <span>{point.index<(editingBoundary==='start'?selectedRoad.startIndex:selectedRoad.endIndex)?'Shorten / extend':'Extend / shorten'}</span>
+                </button>)}</div>
+            </div>
             <label><input type="checkbox" checked={false} onChange={()=>chooseRoad('show')}/> Always show this section</label>
             <label><input type="checkbox" checked={false} onChange={()=>chooseRoad('hide')}/> Hide this section</label>
             <button type="button" className="road-choice-cancel" onClick={()=>setSelectedRoad(null)}>Cancel selection</button>
@@ -350,7 +393,7 @@ export default function App(){
       </>}
       </div>
     </aside>
-    <main><div className="bar"><div className="edit-toolbar"><span>● OSM vector base</span>{!locked?<button className="lock-action" onClick={lockCanvas}>Lock canvas · Edit roads</button>:<><strong>● Canvas locked</strong><button className={roadPicking?'active':''} onClick={()=>{setRoadPicking(v=>!v);setSelecting(false);setSelection(null);setSelectedRoad(null);setTab('document')}}>{roadPicking?'Road selection on':'Select road'}</button><button onClick={()=>{setSelecting(true);setRoadPicking(false);setSelectedRoad(null);setSelection(null)}} className={selecting?'active':''}>Draw selection</button><button disabled={!selection||checking} onClick={checkRepair}>{checking?'Checking...':'Check & repair roads'}</button><button disabled={!lastRepairIds.length} onClick={undoRepairs}>Undo repair</button><button onClick={resetView}>Reset zoom</button><button className="lock-action" onClick={unlockCanvas}>Unlock canvas</button></>}</div><code>{project.camera.center[1].toFixed(4)}, {project.camera.center[0].toFixed(4)} · z{project.camera.zoom.toFixed(1)}</code></div><div className="stage"><div className="canvas" style={{aspectRatio:String(ratio),width:`min(92cqw, 1000px, calc(92cqh * ${ratio}))`}}><MapView project={project} pick={pick} locked={locked} selecting={selecting} selection={selection} roadPicking={roadPicking} selectedRoad={selectedRoad} onCamera={c=>{if(locked){setSelection(null)}else{patch('camera',c)}}} onPick={add} onViewport={setViewport} onMapReady={map=>{liveMapRef.current=map}} onSelection={area=>{setSelection(area);setSelecting(false);if(area)setRepairStatus('Area selected. Click Check & repair roads.')}} onRoadClick={road=>{setSelectedRoad(road);setTab('document');setRepairStatus(road?'Section selected. Choose Always show or Hide in the Document panel.':'Could not select a road here. Zoom in and click a visible road line.')}}/></div></div><footer><span>{locked ? repairStatus || 'Canvas locked by default. Click a road to select it; unlock to resize or reposition.' : 'Drag to pan · scroll to zoom · OpenFreeMap © OpenMapTiles · Data from OpenStreetMap'}</span><code>{px.width.toLocaleString()} × {px.height.toLocaleString()} px @ {project.size.dpi} dpi</code></footer></main>
+    <main><div className="bar"><div className="edit-toolbar"><span>● OSM vector base</span>{!locked?<button className="lock-action" onClick={lockCanvas}>Lock canvas · Edit roads</button>:<><strong>● Canvas locked</strong><button className={roadPicking?'active':''} onClick={()=>{setRoadPicking(v=>!v);setSelecting(false);setSelection(null);setSelectedRoad(null);setTab('document')}}>{roadPicking?'Road selection on':'Select road'}</button><button onClick={()=>{setSelecting(true);setRoadPicking(false);setSelectedRoad(null);setSelection(null)}} className={selecting?'active':''}>Draw selection</button><button disabled={!selection||checking} onClick={checkRepair}>{checking?'Checking...':'Check & repair roads'}</button><button disabled={!lastRepairIds.length} onClick={undoRepairs}>Undo repair</button><button onClick={resetView}>Reset zoom</button><button className="lock-action" onClick={unlockCanvas}>Unlock canvas</button></>}</div><code>{project.camera.center[1].toFixed(4)}, {project.camera.center[0].toFixed(4)} · z{project.camera.zoom.toFixed(1)}</code></div><div className="stage"><div className="canvas" style={{aspectRatio:String(ratio),width:`min(92cqw, 1000px, calc(92cqh * ${ratio}))`}}><MapView project={project} pick={pick} locked={locked} selecting={selecting} selection={selection} roadPicking={roadPicking} selectedRoad={selectedRoad} onCamera={c=>{if(locked){setSelection(null)}else{patch('camera',c)}}} onPick={add} onViewport={setViewport} onMapReady={map=>{liveMapRef.current=map}} onSelection={area=>{setSelection(area);setSelecting(false);if(area)setRepairStatus('Area selected. Click Check & repair roads.')}} onRoadClick={road=>{setSelectedRoad(road);setEditingBoundary('end');setTab('document');setRepairStatus(road?'Blue section selected. Adjust its start or end at a junction, then choose Show or Hide.':'Could not select a road here. Zoom in and click a visible road line.')}} onJunctionClick={changeRoadJunction}/></div></div><footer><span>{locked ? repairStatus || 'Canvas locked by default. Click a road to select it; unlock to resize or reposition.' : 'Drag to pan · scroll to zoom · OpenFreeMap © OpenMapTiles · Data from OpenStreetMap'}</span><code>{px.width.toLocaleString()} × {px.height.toLocaleString()} px @ {project.size.dpi} dpi</code></footer></main>
     {note&&<div className="toast">{note}</div>}
   </div>
 }
