@@ -1,4 +1,5 @@
 import type { Map, StyleSpecification } from 'maplibre-gl'
+import { ensureRoadRepairLayers, type RoadRepair } from './roadRepairs'
 
 export const BASE_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty'
 export const FEATURED_SOURCE_ID = 'strictons-featured-places'
@@ -571,6 +572,7 @@ type ExportMapArgs = {
   theme: MapTheme
   visibility: LayerVisibility
   featuredPlaces: FeaturedPlace[]
+  repairs: RoadRepair[]
 }
 
 type ExportSvgArgs = ExportMapArgs & {
@@ -619,6 +621,7 @@ async function renderMapCanvas(args: ExportMapArgs) {
       exportMap.once('load', () => {
         applyMapDesign(exportMap, args.theme, args.visibility)
         ensureFeaturedLayers(exportMap, args.featuredPlaces, args.theme)
+        ensureRoadRepairLayers(exportMap, args.repairs, args.theme, args.visibility)
         exportMap.once('idle', () => {
           window.clearTimeout(timeout)
           resolve()
@@ -1178,6 +1181,45 @@ function downloadBlob(blob: Blob, filename: string) {
 
 export async function exportMapSvg(args: ExportSvgArgs) {
   const map = args.map
+  const current = map.getCenter()
+  const cameraMoved = Math.abs(map.getZoom()-args.camera.zoom)>0.015 ||
+    Math.abs(current.lng-args.camera.center[0])>0.00001 ||
+    Math.abs(current.lat-args.camera.center[1])>0.00001
+
+  // Inspect-mode zoom must never alter the saved design export.
+  if (cameraMoved) {
+    const logicalWidth=Math.max(1,Math.round(args.previewViewport.width))
+    const logicalHeight=Math.max(1,Math.round(args.previewViewport.height))
+    if(!args.previewViewport.width||!args.previewViewport.height)throw new Error('The preview canvas is not ready.')
+    const host=document.createElement('div')
+    host.style.cssText='position:fixed;left:-100000px;top:0;width:'+logicalWidth+'px;height:'+logicalHeight+'px'
+    document.body.appendChild(host)
+    const maplibregl=await import('maplibre-gl')
+    const snapshot=new maplibregl.Map({
+      container:host,style:BASE_STYLE_URL,center:args.camera.center,zoom:args.camera.zoom,
+      bearing:args.camera.bearing,pitch:args.camera.pitch,
+      interactive:false,attributionControl:false
+    })
+    try {
+      await new Promise<void>((resolve,reject)=>{
+        const timeout=window.setTimeout(()=>reject(new Error('The saved SVG map view timed out while loading.')),30000)
+        snapshot.once('load',()=>{
+          applyMapDesign(snapshot,args.theme,args.visibility)
+          ensureFeaturedLayers(snapshot,args.featuredPlaces,args.theme)
+          ensureRoadRepairLayers(snapshot,args.repairs,args.theme,args.visibility)
+          snapshot.once('idle',()=>{window.clearTimeout(timeout);resolve()})
+        })
+        snapshot.once('error',(event:any)=>{
+          if(event?.error)console.warn('SVG tile warning:',event.error)
+        })
+      })
+      await exportMapSvg({...args,map:snapshot})
+    }finally{
+      snapshot.remove()
+      host.remove()
+    }
+    return
+  }
   if (!map || !map.isStyleLoaded()) throw new Error('The live map is not ready for SVG export.')
 
   const canvas = map.getCanvas()
@@ -1325,6 +1367,32 @@ export async function exportMapSvg(args: ExportSvgArgs) {
         `<path id="${svgId(category)}-${++objectNumber}" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${Number.isFinite(opacity)?opacity:1}" stroke-linecap="round" stroke-linejoin="round"/>`
       )
     }
+  }
+
+  // Add each accepted, OSM-grounded repair to the same named Illustrator road groups.
+  // The map layer is excluded from queryRenderedFeatures, avoiding double export.
+  for (const repair of args.repairs) {
+    const geometry={type:'LineString',coordinates:repair.coordinates}
+    const d=geometryPath(map,geometry,sx,sy,width,height)
+    if(!d || !roadCategories.has(repair.category))continue
+    const categoryRoads=namedRoadGroups.get(repair.category)!
+    const key='repair|'+repair.name.toLowerCase()+'|'+repair.roadClass
+    let road=categoryRoads.get(key)
+    if(!road){
+      road={label:repair.name,roadClass:repair.roadClass,items:[],count:0}
+      categoryRoads.set(key,road)
+    }
+    const number=++road.count
+    const fallback=repair.category==='Highways'?2.4*args.theme.highwayWidthScale:
+      repair.category==='Major Roads'?1.6*args.theme.roadWidthScale:0.85*args.theme.minorRoadWidthScale
+    const fill=repair.category==='Highways'?args.theme.highways:
+      repair.category==='Major Roads'?args.theme.roads:args.theme.minorRoads
+    road.items.push(
+      '<path id="'+svgId('Verified Repair '+repair.name)+'_'+String(number).padStart(2,'0')+'_'+(++objectNumber)+
+      '" data-name="'+escapeXml(repair.name)+' (verified road repair)" data-road-class="'+escapeXml(repair.roadClass)+
+      '" d="'+d+'" fill="none" stroke="'+escapeXml(fill)+'" stroke-width="'+Math.max(0.2,fallback*strokeScale).toFixed(2)+
+      '" stroke-linecap="round" stroke-linejoin="round"/>'
+    )
   }
 
   for (const place of args.featuredPlaces) {
