@@ -484,6 +484,10 @@ type ExportMapArgs = {
   featuredPlaces: FeaturedPlace[]
 }
 
+type ExportSvgArgs = ExportMapArgs & {
+  map: Map
+}
+
 async function renderMapCanvas(args: ExportMapArgs) {
   const { width, height } = totalPrintPixels(args.size)
   if (width > 8192 || height > 8192 || width * height > 45_000_000) {
@@ -554,17 +558,370 @@ export async function exportMapPng(args: ExportMapArgs) {
   downloadDataUrl(output.toDataURL('image/png'), args.filename)
 }
 
-export async function exportMapSvg(args: ExportMapArgs) {
-  const output = await renderMapCanvas(args)
+function escapeXml(value: unknown) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+}
+
+function svgId(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'item'
+}
+
+function evaluateStyleExpression(value: any, properties: Record<string, any>, zoom: number): any {
+  if (!Array.isArray(value)) return value
+  const op = value[0]
+
+  if (op === 'literal') return value[1]
+  if (op === 'zoom') return zoom
+  if (op === 'get') return properties?.[String(value[1])]
+  if (op === 'has') return Object.prototype.hasOwnProperty.call(properties || {}, String(value[1]))
+  if (op === 'coalesce') {
+    for (let i = 1; i < value.length; i++) {
+      const candidate = evaluateStyleExpression(value[i], properties, zoom)
+      if (candidate !== null && candidate !== undefined) return candidate
+    }
+    return undefined
+  }
+  if (op === '==') return evaluateStyleExpression(value[1], properties, zoom) === evaluateStyleExpression(value[2], properties, zoom)
+  if (op === '!=') return evaluateStyleExpression(value[1], properties, zoom) !== evaluateStyleExpression(value[2], properties, zoom)
+  if (op === 'any') return value.slice(1).some((v:any) => Boolean(evaluateStyleExpression(v, properties, zoom)))
+  if (op === 'all') return value.slice(1).every((v:any) => Boolean(evaluateStyleExpression(v, properties, zoom)))
+  if (op === '*') {
+    const numbers = value.slice(1).map((v:any) => Number(evaluateStyleExpression(v, properties, zoom)))
+    return numbers.every((v:number) => Number.isFinite(v)) ? numbers.reduce((a:number,b:number)=>a*b,1) : undefined
+  }
+  if (op === 'case') {
+    for (let i = 1; i < value.length - 1; i += 2) {
+      if (evaluateStyleExpression(value[i], properties, zoom)) return evaluateStyleExpression(value[i + 1], properties, zoom)
+    }
+    return evaluateStyleExpression(value[value.length - 1], properties, zoom)
+  }
+  if (op === 'match') {
+    const input = evaluateStyleExpression(value[1], properties, zoom)
+    for (let i = 2; i < value.length - 1; i += 2) {
+      const candidate = value[i]
+      if ((Array.isArray(candidate) && candidate.includes(input)) || candidate === input) {
+        return evaluateStyleExpression(value[i + 1], properties, zoom)
+      }
+    }
+    return evaluateStyleExpression(value[value.length - 1], properties, zoom)
+  }
+  if (op === 'step') {
+    const input = Number(evaluateStyleExpression(value[1], properties, zoom))
+    let output = evaluateStyleExpression(value[2], properties, zoom)
+    for (let i = 3; i < value.length; i += 2) {
+      if (input < Number(value[i])) break
+      output = evaluateStyleExpression(value[i + 1], properties, zoom)
+    }
+    return output
+  }
+  if (op === 'interpolate') {
+    const input = Number(evaluateStyleExpression(value[2], properties, zoom))
+    const stops: { stop:number; output:any }[] = []
+    for (let i = 3; i < value.length; i += 2) {
+      stops.push({ stop:Number(value[i]), output:evaluateStyleExpression(value[i + 1], properties, zoom) })
+    }
+    if (!stops.length) return undefined
+    if (input <= stops[0].stop) return stops[0].output
+    if (input >= stops[stops.length - 1].stop) return stops[stops.length - 1].output
+    for (let i = 0; i < stops.length - 1; i++) {
+      const a = stops[i], b = stops[i + 1]
+      if (input >= a.stop && input <= b.stop) {
+        if (typeof a.output !== 'number' || typeof b.output !== 'number') return a.output
+        const t = (input - a.stop) / Math.max(0.000001, b.stop - a.stop)
+        return a.output + (b.output - a.output) * t
+      }
+    }
+  }
+  return undefined
+}
+
+function styleValue(map: Map, layerId: string, kind: 'paint' | 'layout', property: string, featureProps: Record<string, any>, fallback: any) {
+  try {
+    const raw = kind === 'paint'
+      ? (map as any).getPaintProperty(layerId, property)
+      : (map as any).getLayoutProperty(layerId, property)
+    const evaluated = evaluateStyleExpression(raw, featureProps, map.getZoom())
+    return evaluated ?? fallback
+  } catch {
+    return fallback
+  }
+}
+
+function projectCoordinate(map: Map, coordinate: any, sx: number, sy: number) {
+  const point = map.project([Number(coordinate[0]), Number(coordinate[1])])
+  return { x: point.x * sx, y: point.y * sy }
+}
+
+function linePath(map: Map, coordinates: any[], sx: number, sy: number) {
+  return coordinates.map((coordinate, index) => {
+    const p = projectCoordinate(map, coordinate, sx, sy)
+    return `${index === 0 ? 'M' : 'L'} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`
+  }).join(' ')
+}
+
+function geometryPath(map: Map, geometry: any, sx: number, sy: number): string {
+  if (!geometry) return ''
+  if (geometry.type === 'LineString') return linePath(map, geometry.coordinates, sx, sy)
+  if (geometry.type === 'MultiLineString') return geometry.coordinates.map((line:any[]) => linePath(map, line, sx, sy)).join(' ')
+  if (geometry.type === 'Polygon') return geometry.coordinates.map((ring:any[]) => `${linePath(map, ring, sx, sy)} Z`).join(' ')
+  if (geometry.type === 'MultiPolygon') {
+    return geometry.coordinates.flatMap((polygon:any[][]) => polygon.map((ring:any[]) => `${linePath(map, ring, sx, sy)} Z`)).join(' ')
+  }
+  return ''
+}
+
+function lineLabelPlacement(map: Map, coordinates: any[], sx: number, sy: number) {
+  const points = coordinates.map((c:any) => projectCoordinate(map, c, sx, sy))
+  if (!points.length) return null
+  if (points.length === 1) return { ...points[0], angle:0 }
+  const lengths:number[] = []
+  let total = 0
+  for (let i = 0; i < points.length - 1; i++) {
+    const dx = points[i + 1].x - points[i].x
+    const dy = points[i + 1].y - points[i].y
+    const len = Math.hypot(dx, dy)
+    lengths.push(len)
+    total += len
+  }
+  let target = total / 2
+  for (let i = 0; i < lengths.length; i++) {
+    if (target <= lengths[i]) {
+      const a = points[i], b = points[i + 1]
+      const t = lengths[i] ? target / lengths[i] : 0
+      let angle = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI
+      if (angle > 90 || angle < -90) angle += 180
+      return { x:a.x + (b.x - a.x) * t, y:a.y + (b.y - a.y) * t, angle }
+    }
+    target -= lengths[i]
+  }
+  return { ...points[Math.floor(points.length / 2)], angle:0 }
+}
+
+function labelPlacement(map: Map, geometry: any, sx: number, sy: number) {
+  if (!geometry) return null
+  if (geometry.type === 'Point') {
+    const p = projectCoordinate(map, geometry.coordinates, sx, sy)
+    return { ...p, angle:0 }
+  }
+  if (geometry.type === 'MultiPoint') {
+    const p = projectCoordinate(map, geometry.coordinates[0], sx, sy)
+    return { ...p, angle:0 }
+  }
+  if (geometry.type === 'LineString') return lineLabelPlacement(map, geometry.coordinates, sx, sy)
+  if (geometry.type === 'MultiLineString') {
+    const longest = [...geometry.coordinates].sort((a:any[],b:any[]) => b.length - a.length)[0]
+    return longest ? lineLabelPlacement(map, longest, sx, sy) : null
+  }
+  const rings = geometry.type === 'Polygon' ? geometry.coordinates : geometry.type === 'MultiPolygon' ? geometry.coordinates?.[0] : null
+  const ring = Array.isArray(rings?.[0]?.[0]) ? rings[0] : rings?.[0] || rings
+  if (!Array.isArray(ring) || !ring.length) return null
+  const points = ring.map((c:any) => projectCoordinate(map, c, sx, sy))
+  const xs = points.map((p:any) => p.x), ys = points.map((p:any) => p.y)
+  return { x:(Math.min(...xs)+Math.max(...xs))/2, y:(Math.min(...ys)+Math.max(...ys))/2, angle:0 }
+}
+
+function roadGroup(properties: Record<string, any>) {
+  const roadClass = String(properties?.class || '')
+  const expressway = properties?.expressway === 1 || properties?.expressway === '1' || properties?.expressway === true
+  if (expressway || ['motorway','trunk','motorway_construction','trunk_construction'].includes(roadClass)) return 'Highways'
+  if (['primary','secondary','tertiary','primary_construction','secondary_construction','tertiary_construction','link'].includes(roadClass)) return 'Major Roads'
+  return 'Minor Roads'
+}
+
+function featureCategory(feature: any) {
+  const layer = feature.layer || {}
+  const props = feature.properties || {}
+  const fingerprint = `${layer.id || ''} ${feature.sourceLayer || layer['source-layer'] || ''}`.toLowerCase()
+  const sourceLayer = String(feature.sourceLayer || layer['source-layer'] || '').toLowerCase()
+  const roadClass = String(props.class || '').toLowerCase()
+
+  if (String(layer.id || '').startsWith('strictons-')) return null
+  if (layer.type === 'symbol') return 'Labels'
+  if (sourceLayer === 'building' || /building/.test(fingerprint)) return 'Buildings'
+  if (sourceLayer === 'water' || sourceLayer === 'waterway' || /water|ocean|sea|marine|river|lake/.test(fingerprint)) return 'Water'
+  if (/park|forest|wood|grass|scrub|landcover|landuse|cemetery|golf|pitch|garden|meadow/.test(fingerprint)) return 'Parks'
+  if (sourceLayer === 'boundary' || /boundary|admin/.test(fingerprint)) return 'Boundaries'
+  if (/rail/.test(fingerprint) || ['rail','light_rail','subway','tram','narrow_gauge'].includes(roadClass)) return 'Railways'
+  if (
+    sourceLayer === 'transportation' ||
+    /road|street|highway|motorway|trunk|primary|secondary|tertiary|minor|service|bridge|tunnel|path|track|link/.test(fingerprint)
+  ) return roadGroup(props)
+  if (layer.type === 'fill') return 'Land Details'
+  if (layer.type === 'line') return 'Other Lines'
+  if (layer.type === 'circle') return 'Points'
+  return null
+}
+
+function fallbackLineWidth(category: string, theme: MapTheme) {
+  if (category === 'Highways') return 2.4 * theme.highwayWidthScale
+  if (category === 'Major Roads') return 1.6 * theme.roadWidthScale
+  if (category === 'Minor Roads') return 0.85 * theme.minorRoadWidthScale
+  if (category === 'Railways') return 1
+  if (category === 'Boundaries') return 0.7
+  return 0.8
+}
+
+function fallbackLineColour(category: string, theme: MapTheme) {
+  if (category === 'Highways') return theme.highways
+  if (category === 'Major Roads') return theme.roads
+  if (category === 'Minor Roads') return theme.minorRoads
+  if (category === 'Railways') return theme.railways
+  if (category === 'Boundaries') return theme.boundaries
+  if (category === 'Water') return theme.water
+  return theme.labels
+}
+
+function fallbackFillColour(category: string, theme: MapTheme) {
+  if (category === 'Water') return theme.water
+  if (category === 'Parks') return theme.parks
+  if (category === 'Buildings') return theme.buildings
+  return theme.land
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+export async function exportMapSvg(args: ExportSvgArgs) {
+  const map = args.map
+  if (!map || !map.isStyleLoaded()) throw new Error('The live map is not ready for SVG export.')
+
+  const canvas = map.getCanvas()
+  const logicalWidth = canvas.clientWidth || args.previewViewport.width
+  const logicalHeight = canvas.clientHeight || args.previewViewport.height
+  if (!logicalWidth || !logicalHeight) throw new Error('The preview canvas is not ready for SVG export.')
+
+  const { width, height } = totalPrintPixels(args.size)
+  const sx = width / logicalWidth
+  const sy = height / logicalHeight
+  const strokeScale = (sx + sy) / 2
   const widthMm = args.size.widthMm + args.size.bleedMm * 2
   const heightMm = args.size.heightMm + args.size.bleedMm * 2
-  const raster = output.toDataURL('image/png')
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${output.width} ${output.height}" preserveAspectRatio="none"><image href="${raster}" xlink:href="${raster}" x="0" y="0" width="${output.width}" height="${output.height}" preserveAspectRatio="none"/></svg>`
-  const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  try {
-    downloadDataUrl(url, args.filename)
-  } finally {
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  const features = [...map.queryRenderedFeatures()].reverse() as any[]
+
+  const groupNames = [
+    'Land Details',
+    'Water',
+    'Parks',
+    'Buildings',
+    'Boundaries',
+    'Minor Roads',
+    'Major Roads',
+    'Highways',
+    'Railways',
+    'Other Lines',
+    'Points',
+    'Labels',
+    'Featured Markers',
+    'Featured Labels',
+  ]
+  const groups = new globalThis.Map<string,string[]>(groupNames.map(name => [name, []]))
+  const seen = new Set<string>()
+  const seenLabels = new Set<string>()
+  let objectNumber = 0
+
+  for (const feature of features) {
+    const category = featureCategory(feature)
+    if (!category || !groups.has(category)) continue
+    const layerId = String(feature.layer?.id || 'map-layer')
+    const properties = feature.properties || {}
+    const geometry = feature.geometry
+    const featureKey = `${layerId}|${feature.id ?? ''}|${JSON.stringify(geometry)}`
+    if (category !== 'Labels') {
+      if (seen.has(featureKey)) continue
+      seen.add(featureKey)
+    }
+
+    if (category === 'Labels') {
+      const name = properties.name || properties['name:en'] || properties.ref
+      if (!name) continue
+      const placement = labelPlacement(map, geometry, sx, sy)
+      if (!placement) continue
+      const labelKey = `${name}|${Math.round(placement.x / 18)}|${Math.round(placement.y / 18)}`
+      if (seenLabels.has(labelKey)) continue
+      seenLabels.add(labelKey)
+
+      const fontSizeRaw = Number(styleValue(map, layerId, 'layout', 'text-size', properties, 12))
+      const fontSize = Math.max(6, fontSizeRaw * strokeScale)
+      const fill = String(styleValue(map, layerId, 'paint', 'text-color', properties, args.theme.labels))
+      const halo = String(styleValue(map, layerId, 'paint', 'text-halo-color', properties, args.theme.labelHalo))
+      const haloWidth = Number(styleValue(map, layerId, 'paint', 'text-halo-width', properties, 1))
+      const transform = placement.angle ? ` transform="rotate(${placement.angle.toFixed(2)} ${placement.x.toFixed(2)} ${placement.y.toFixed(2)})"` : ''
+      groups.get('Labels')!.push(
+        `<text id="label-${++objectNumber}" data-layer="${escapeXml(layerId)}" x="${placement.x.toFixed(2)}" y="${placement.y.toFixed(2)}" text-anchor="middle" dominant-baseline="middle" font-family="Arial, sans-serif" font-size="${fontSize.toFixed(2)}" fill="${escapeXml(fill)}" stroke="${escapeXml(halo)}" stroke-width="${Math.max(0,haloWidth*strokeScale).toFixed(2)}" paint-order="stroke"${transform}>${escapeXml(name)}</text>`
+      )
+      continue
+    }
+
+    if (category === 'Points' || geometry?.type === 'Point' && feature.layer?.type === 'circle') {
+      const placement = labelPlacement(map, geometry, sx, sy)
+      if (!placement) continue
+      const radius = Number(styleValue(map, layerId, 'paint', 'circle-radius', properties, 3)) * strokeScale
+      const fill = String(styleValue(map, layerId, 'paint', 'circle-color', properties, args.theme.featured))
+      groups.get('Points')!.push(
+        `<circle id="point-${++objectNumber}" data-layer="${escapeXml(layerId)}" cx="${placement.x.toFixed(2)}" cy="${placement.y.toFixed(2)}" r="${Math.max(1,radius).toFixed(2)}" fill="${escapeXml(fill)}"/>`
+      )
+      continue
+    }
+
+    const d = geometryPath(map, geometry, sx, sy)
+    if (!d) continue
+
+    if (feature.layer?.type === 'fill' || ['Water','Parks','Buildings','Land Details'].includes(category) && /Polygon/.test(geometry?.type || '')) {
+      const fill = String(styleValue(map, layerId, 'paint', 'fill-color', properties, fallbackFillColour(category,args.theme)))
+      const opacity = Number(styleValue(map, layerId, 'paint', 'fill-opacity', properties, 1))
+      groups.get(category)!.push(
+        `<path id="${svgId(category)}-${++objectNumber}" data-layer="${escapeXml(layerId)}" d="${d}" fill="${escapeXml(fill)}" fill-opacity="${Number.isFinite(opacity)?opacity:1}" fill-rule="evenodd"/>`
+      )
+      continue
+    }
+
+    const colour = String(styleValue(map, layerId, 'paint', 'line-color', properties, fallbackLineColour(category,args.theme)))
+    const rawWidth = Number(styleValue(map, layerId, 'paint', 'line-width', properties, fallbackLineWidth(category,args.theme)))
+    const opacity = Number(styleValue(map, layerId, 'paint', 'line-opacity', properties, 1))
+    const strokeWidth = Math.max(0.2, (Number.isFinite(rawWidth)?rawWidth:fallbackLineWidth(category,args.theme)) * strokeScale)
+    groups.get(category)!.push(
+      `<path id="${svgId(category)}-${++objectNumber}" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${Number.isFinite(opacity)?opacity:1}" stroke-linecap="round" stroke-linejoin="round"/>`
+    )
   }
+
+  for (const place of args.featuredPlaces) {
+    const point = projectCoordinate(map, [place.lng, place.lat], sx, sy)
+    if (point.x < -30 || point.x > width + 30 || point.y < -30 || point.y > height + 30) continue
+    const markerRadius = Math.max(2, 5 * strokeScale)
+    groups.get('Featured Markers')!.push(
+      `<circle id="featured-marker-${++objectNumber}" data-name="${escapeXml(place.name)}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="${markerRadius.toFixed(2)}" fill="${escapeXml(args.theme.featured)}" stroke="${escapeXml(args.theme.featuredHalo)}" stroke-width="${Math.max(1,2*strokeScale).toFixed(2)}"/>`
+    )
+    groups.get('Featured Labels')!.push(
+      `<text id="featured-label-${++objectNumber}" data-name="${escapeXml(place.name)}" x="${point.x.toFixed(2)}" y="${(point.y + 16*strokeScale).toFixed(2)}" text-anchor="middle" font-family="Arial, sans-serif" font-size="${Math.max(6,args.theme.featuredLabelSize*strokeScale).toFixed(2)}" fill="${escapeXml(args.theme.featuredText)}" stroke="${escapeXml(args.theme.featuredHalo)}" stroke-width="${Math.max(0.5,1.5*strokeScale).toFixed(2)}" paint-order="stroke">${escapeXml(place.name)}</text>`
+    )
+  }
+
+  const orderedGroups = groupNames.map((name) => {
+    const items = groups.get(name) || []
+    return `<g id="${svgId(name)}" data-name="${escapeXml(name)}">${items.join('')}</g>`
+  }).join('')
+
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${width} ${height}" shape-rendering="geometricPrecision">
+  <defs><clipPath id="canvas-clip"><rect x="0" y="0" width="${width}" height="${height}"/></clipPath></defs>
+  <g id="map-artwork" data-name="Map Artwork" clip-path="url(#canvas-clip)">
+    <rect id="land-background" x="0" y="0" width="${width}" height="${height}" fill="${escapeXml(args.theme.land)}"/>
+    ${orderedGroups}
+  </g>
+</svg>`
+
+  downloadBlob(new Blob([svg], { type:'image/svg+xml;charset=utf-8' }), args.filename)
 }
