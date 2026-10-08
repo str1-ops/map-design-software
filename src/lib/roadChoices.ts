@@ -298,15 +298,23 @@ function selectedRoadHint(selected:SelectedRoad) {
 export function adjustRoadSelection(
   selected:SelectedRoad,boundary:'start'|'end',junctionIndex:number
 ):SelectedRoad|null {
-  if(!Number.isInteger(junctionIndex)||!selected.junctions.some(point=>point.index===junctionIndex))return null
+  if(!Number.isInteger(junctionIndex)||junctionIndex<0||junctionIndex>=selected.routeCoordinates.length)return null
   const startIndex=boundary==='start'?junctionIndex:selected.startIndex
   const endIndex=boundary==='end'?junctionIndex:selected.endIndex
   if(startIndex>=endIndex)return null
+  // Users can also snap an endpoint directly to a vertex on the same source
+  // road. This is the fallback when map tiles omit a nearby intersection.
+  const hasMarker=selected.junctions.some(point=>point.index===junctionIndex)
+  const junctions=hasMarker?selected.junctions:
+    [...selected.junctions,{index:junctionIndex,coordinates:selected.routeCoordinates[junctionIndex],kind:'endpoint' as const}]
+      .sort((a,b)=>a.index-b.index)
   const updated:SelectedRoad={
-    ...selected,startIndex,endIndex,
+    ...selected,startIndex,endIndex,junctions,
     coordinates:selected.routeCoordinates.slice(startIndex,endIndex+1)
   }
-  return {...updated,selectionHint:selectedRoadHint(updated)}
+  const hint=hasMarker?selectedRoadHint(updated):
+    'Endpoint snapped to the mapped road geometry. Adjust it again or save the blue section.'
+  return {...updated,selectionHint:hint}
 }
 
 export function selectRoadAt(map:Map,click:{x:number;y:number}):SelectedRoad|null {
