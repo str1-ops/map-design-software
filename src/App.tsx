@@ -196,7 +196,8 @@ function MapView({project,pick,locked,selecting,selection,roadPicking,selectedRo
       <div ref={host} className="map"/>
       {roadPicking && !selecting && selectedRoad &&
         <RoadSelectionOverlay map={mapRef.current} road={selectedRoad}
-          boundary={editingBoundary} onJunctionClick={onJunctionClick}/>}
+          boundary={editingBoundary} onJunctionClick={onJunctionClick}
+          onRoadPointClick={onJunctionClick}/>}
       {selectionRect&&!selecting&&<div className="repair-area" style={selectionRect}/>}
       {selecting&&<div className="repair-selector" onPointerDown={onPointerDown}
         onPointerMove={onPointerMove} onPointerUp={onPointerUp}
@@ -348,7 +349,7 @@ export default function App(){
                 <button type="button" className={editingBoundary==='start'?'on':''} aria-pressed={editingBoundary==='start'} onClick={()=>setEditingBoundary('start')}>Adjust start</button>
                 <button type="button" className={editingBoundary==='end'?'on':''} aria-pressed={editingBoundary==='end'} onClick={()=>setEditingBoundary('end')}>Adjust end</button>
               </div>
-              <p className="help">The selected section is blue. Click a blue junction dot on the map to move the {editingBoundary}, or choose a junction below.</p>
+              <p className="help">The blue line is your selected section. Click a junction dot, or click anywhere along the faint-blue road to move the {editingBoundary} endpoint. You can also choose a junction below.</p>
               <div className="junction-options">{selectedRoad.junctions
                 .filter(point=>editingBoundary==='start'?point.index<selectedRoad.endIndex:point.index>selectedRoad.startIndex)
                 .sort((a,b)=>Math.abs(a.index-(editingBoundary==='start'?selectedRoad.startIndex:selectedRoad.endIndex))-Math.abs(b.index-(editingBoundary==='start'?selectedRoad.startIndex:selectedRoad.endIndex)))
