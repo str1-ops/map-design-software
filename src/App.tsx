@@ -39,19 +39,20 @@ function Colour({label,value,onChange}:{label:string;value:string;onChange:(v:st
   return <label className="colour"><span>{label}</span><div><input type="color" value={value} onChange={e=>onChange(e.target.value)}/><code>{value.toUpperCase()}</code></div></label>
 }
 
-function MapView({project,pick,onCamera,onPick,onViewport}:{project:Project;pick:boolean;onCamera:(c:CameraState)=>void;onPick:(p:FeaturedPlace)=>void;onViewport:(v:{width:number;height:number})=>void}){
-  const host=useRef<HTMLDivElement>(null), mapRef=useRef<MapLibreMap|null>(null), latest=useRef({onCamera,onPick,onViewport})
-  latest.current={onCamera,onPick,onViewport}
+function MapView({project,pick,onCamera,onPick,onViewport,onMapReady}:{project:Project;pick:boolean;onCamera:(c:CameraState)=>void;onPick:(p:FeaturedPlace)=>void;onViewport:(v:{width:number;height:number})=>void;onMapReady:(map:MapLibreMap|null)=>void}){
+  const host=useRef<HTMLDivElement>(null), mapRef=useRef<MapLibreMap|null>(null), latest=useRef({onCamera,onPick,onViewport,onMapReady})
+  latest.current={onCamera,onPick,onViewport,onMapReady}
   useEffect(()=>{
     if(!host.current || mapRef.current) return
     const map=new maplibregl.Map({container:host.current,style:BASE_STYLE_URL,center:project.camera.center,zoom:project.camera.zoom,bearing:0,pitch:0,attributionControl:false,canvasContextAttributes:{preserveDrawingBuffer:true}})
     mapRef.current=map
+    latest.current.onMapReady(map)
     const syncViewport=()=>{ map.resize(); if(host.current) latest.current.onViewport({width:host.current.clientWidth,height:host.current.clientHeight}) }
     const ro=new ResizeObserver(syncViewport); ro.observe(host.current)
     map.on('load',()=>{ syncViewport(); applyMapDesign(map,project.theme,project.visible); ensureFeaturedLayers(map,project.places,project.theme) })
     map.on('moveend',()=>{ const c=map.getCenter(); latest.current.onCamera({center:[c.lng,c.lat],zoom:map.getZoom(),bearing:map.getBearing(),pitch:map.getPitch()}) })
     map.on('click',e=>{ if(map.getCanvas().dataset.pick!=='1') return; latest.current.onPick({id:crypto.randomUUID(),name:guessFeatureName(map,e),lng:e.lngLat.lng,lat:e.lngLat.lat,category:'Featured'}) })
-    return ()=>{ ro.disconnect(); map.remove(); mapRef.current=null }
+    return ()=>{ ro.disconnect(); latest.current.onMapReady(null); map.remove(); mapRef.current=null }
   },[])
   useEffect(()=>{ const m=mapRef.current; if(m){m.getCanvas().dataset.pick=pick?'1':'';m.getCanvas().style.cursor=pick?'crosshair':''}},[pick])
   useEffect(()=>{ const m=mapRef.current;if(m?.isStyleLoaded()){applyMapDesign(m,project.theme,project.visible);ensureFeaturedLayers(m,project.places,project.theme)}},[project.theme,project.visible,project.places])
@@ -70,6 +71,7 @@ async function geocode(q:string):Promise<SearchResult[]> {
 }
 
 export default function App(){
+  const liveMapRef=useRef<MapLibreMap|null>(null)
   const [project,setProject]=useState<Project>(()=>load()), [tab,setTab]=useState<'document'|'style'|'places'>('document'), [pick,setPick]=useState(false)
   const [query,setQuery]=useState(''),[results,setResults]=useState<SearchResult[]>([]),[busy,setBusy]=useState(false),[note,setNote]=useState(''),[viewport,setViewport]=useState({width:0,height:0})
   const px=useMemo(()=>totalPrintPixels(project.size),[project.size]), ratio=(project.size.widthMm+project.size.bleedMm*2)/(project.size.heightMm+project.size.bleedMm*2)
@@ -83,7 +85,7 @@ export default function App(){
   const go=(r:SearchResult)=>{patch('camera',{...project.camera,center:[Number(r.lon),Number(r.lat)],zoom:r.type==='city'||r.type==='town'?12:14});setResults([])}
   const add=(p:FeaturedPlace)=>{patch('places',[...project.places,p]);setPick(false);setTab('places')}
   const exportPng=async()=>{setBusy(true);try{await exportMapPng({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.png`,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places});setNote('Print PNG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
-  const exportSvg=async()=>{setBusy(true);try{await exportMapSvg({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.svg`,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places});setNote('SVG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
+  const exportSvg=async()=>{setBusy(true);try{const map=liveMapRef.current;if(!map)throw new Error('The live map is not ready yet.');await exportMapSvg({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.svg`,map,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places});setNote('Editable SVG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
   return <div className="shell">
     <header><b>STRictons <small>MAP STUDIO</small></b><input value={project.name} onChange={e=>patch('name',e.target.value)}/><div className="export-actions"><button onClick={exportPng} disabled={busy}>↓ PNG</button><button onClick={exportSvg} disabled={busy}>↓ SVG</button></div></header>
     <aside>
@@ -108,7 +110,7 @@ export default function App(){
       </>}
       </div>
     </aside>
-    <main><div className="bar"><span>● OSM vector base · OpenFreeMap + MapLibre</span><code>{project.camera.center[1].toFixed(4)}, {project.camera.center[0].toFixed(4)} · z{project.camera.zoom.toFixed(1)}</code></div><div className="stage"><div className="canvas" style={{aspectRatio:String(ratio),width:`min(92cqw, 1000px, calc(92cqh * ${ratio}))`}}><MapView project={project} pick={pick} onCamera={c=>patch('camera',c)} onPick={add} onViewport={setViewport}/></div></div><footer><span>Drag to pan · scroll to zoom · OpenFreeMap © OpenMapTiles · Data from OpenStreetMap</span><code>{px.width.toLocaleString()} × {px.height.toLocaleString()} px @ {project.size.dpi} dpi</code></footer></main>
+    <main><div className="bar"><span>● OSM vector base · OpenFreeMap + MapLibre</span><code>{project.camera.center[1].toFixed(4)}, {project.camera.center[0].toFixed(4)} · z{project.camera.zoom.toFixed(1)}</code></div><div className="stage"><div className="canvas" style={{aspectRatio:String(ratio),width:`min(92cqw, 1000px, calc(92cqh * ${ratio}))`}}><MapView project={project} pick={pick} onCamera={c=>patch('camera',c)} onPick={add} onViewport={setViewport} onMapReady={map=>{liveMapRef.current=map}}/></div></div><footer><span>Drag to pan · scroll to zoom · OpenFreeMap © OpenMapTiles · Data from OpenStreetMap</span><code>{px.width.toLocaleString()} × {px.height.toLocaleString()} px @ {project.size.dpi} dpi</code></footer></main>
     {note&&<div className="toast">{note}</div>}
   </div>
 }
