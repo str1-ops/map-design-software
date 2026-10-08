@@ -657,7 +657,14 @@ function escapeXml(value: unknown) {
 }
 
 function svgId(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'item'
+  const cleaned = value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/&/g, ' And ')
+    .replace(/[^A-Za-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  const readable = cleaned || 'Item'
+  return /^[A-Za-z_]/.test(readable) ? readable : `Item_${readable}`
 }
 
 function evaluateStyleExpression(value: any, properties: Record<string, any>, zoom: number): any {
@@ -746,20 +753,133 @@ function projectCoordinate(map: Map, coordinate: any, sx: number, sy: number) {
   return { x: point.x * sx, y: point.y * sy }
 }
 
-function linePath(map: Map, coordinates: any[], sx: number, sy: number) {
-  return coordinates.map((coordinate, index) => {
-    const p = projectCoordinate(map, coordinate, sx, sy)
-    return `${index === 0 ? 'M' : 'L'} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`
-  }).join(' ')
+type SvgPoint = { x:number; y:number }
+
+function pointPath(points: SvgPoint[]) {
+  return points.map((point, index) =>
+    `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`
+  ).join(' ')
 }
 
-function geometryPath(map: Map, geometry: any, sx: number, sy: number): string {
+function pointInsideCanvas(point: SvgPoint, width: number, height: number) {
+  return point.x >= 0 && point.x <= width && point.y >= 0 && point.y <= height
+}
+
+function clipSegmentToCanvas(a: SvgPoint, b: SvgPoint, width: number, height: number): [SvgPoint,SvgPoint] | null {
+  let x0=a.x, y0=a.y, x1=b.x, y1=b.y
+  const dx=x1-x0, dy=y1-y0
+  let t0=0, t1=1
+  const tests:[number,number][]=[
+    [-dx,x0],
+    [dx,width-x0],
+    [-dy,y0],
+    [dy,height-y0],
+  ]
+
+  for(const [p,q] of tests){
+    if(p===0){
+      if(q<0) return null
+      continue
+    }
+    const r=q/p
+    if(p<0){
+      if(r>t1) return null
+      if(r>t0) t0=r
+    }else{
+      if(r<t0) return null
+      if(r<t1) t1=r
+    }
+  }
+
+  return [
+    {x:x0+t0*dx,y:y0+t0*dy},
+    {x:x0+t1*dx,y:y0+t1*dy},
+  ]
+}
+
+function clippedPolylinePath(points: SvgPoint[], width: number, height: number) {
+  if(points.length<2) return ''
+  const paths:SvgPoint[][]=[]
+  let current:SvgPoint[]=[]
+  const same=(a:SvgPoint,b:SvgPoint)=>Math.abs(a.x-b.x)<0.01&&Math.abs(a.y-b.y)<0.01
+  const flush=()=>{if(current.length>1)paths.push(current);current=[]}
+
+  for(let i=0;i<points.length-1;i++){
+    const clipped=clipSegmentToCanvas(points[i],points[i+1],width,height)
+    if(!clipped){flush();continue}
+    const [start,end]=clipped
+    if(!current.length) current=[start,end]
+    else if(same(current[current.length-1],start)) current.push(end)
+    else {flush();current=[start,end]}
+  }
+  flush()
+  return paths.map(pointPath).join(' ')
+}
+
+function clipPolygonRing(points: SvgPoint[], width: number, height: number) {
+  const edges=[
+    {
+      inside:(p:SvgPoint)=>p.x>=0,
+      intersect:(a:SvgPoint,b:SvgPoint)=>({x:0,y:a.y+(b.y-a.y)*(0-a.x)/(b.x-a.x)}),
+    },
+    {
+      inside:(p:SvgPoint)=>p.x<=width,
+      intersect:(a:SvgPoint,b:SvgPoint)=>({x:width,y:a.y+(b.y-a.y)*(width-a.x)/(b.x-a.x)}),
+    },
+    {
+      inside:(p:SvgPoint)=>p.y>=0,
+      intersect:(a:SvgPoint,b:SvgPoint)=>({x:a.x+(b.x-a.x)*(0-a.y)/(b.y-a.y),y:0}),
+    },
+    {
+      inside:(p:SvgPoint)=>p.y<=height,
+      intersect:(a:SvgPoint,b:SvgPoint)=>({x:a.x+(b.x-a.x)*(height-a.y)/(b.y-a.y),y:height}),
+    },
+  ]
+
+  let output=points
+  for(const edge of edges){
+    if(!output.length) break
+    const input=output
+    output=[]
+    let previous=input[input.length-1]
+    let previousInside=edge.inside(previous)
+
+    for(const current of input){
+      const currentInside=edge.inside(current)
+      if(currentInside){
+        if(!previousInside) output.push(edge.intersect(previous,current))
+        output.push(current)
+      }else if(previousInside){
+        output.push(edge.intersect(previous,current))
+      }
+      previous=current
+      previousInside=currentInside
+    }
+  }
+  return output.filter((point)=>Number.isFinite(point.x)&&Number.isFinite(point.y))
+}
+
+function geometryPath(map: Map, geometry: any, sx: number, sy: number, width: number, height: number): string {
   if (!geometry) return ''
-  if (geometry.type === 'LineString') return linePath(map, geometry.coordinates, sx, sy)
-  if (geometry.type === 'MultiLineString') return geometry.coordinates.map((line:any[]) => linePath(map, line, sx, sy)).join(' ')
-  if (geometry.type === 'Polygon') return geometry.coordinates.map((ring:any[]) => `${linePath(map, ring, sx, sy)} Z`).join(' ')
+  const projectLine=(coordinates:any[])=>coordinates.map((coordinate)=>projectCoordinate(map,coordinate,sx,sy))
+
+  if (geometry.type === 'LineString') {
+    return clippedPolylinePath(projectLine(geometry.coordinates),width,height)
+  }
+  if (geometry.type === 'MultiLineString') {
+    return geometry.coordinates.map((line:any[])=>clippedPolylinePath(projectLine(line),width,height)).filter(Boolean).join(' ')
+  }
+  if (geometry.type === 'Polygon') {
+    return geometry.coordinates.map((ring:any[])=>{
+      const clipped=clipPolygonRing(projectLine(ring),width,height)
+      return clipped.length>=3?`${pointPath(clipped)} Z`:''
+    }).filter(Boolean).join(' ')
+  }
   if (geometry.type === 'MultiPolygon') {
-    return geometry.coordinates.flatMap((polygon:any[][]) => polygon.map((ring:any[]) => `${linePath(map, ring, sx, sy)} Z`)).join(' ')
+    return geometry.coordinates.flatMap((polygon:any[][])=>polygon.map((ring:any[])=>{
+      const clipped=clipPolygonRing(projectLine(ring),width,height)
+      return clipped.length>=3?`${pointPath(clipped)} Z`:''
+    })).filter(Boolean).join(' ')
   }
   return ''
 }
@@ -977,7 +1097,7 @@ export async function exportMapSvg(args: ExportSvgArgs) {
       const name = properties.name || properties['name:en'] || properties.ref
       if (!name) continue
       const placement = labelPlacement(map, geometry, sx, sy)
-      if (!placement) continue
+      if (!placement || !pointInsideCanvas(placement, width, height)) continue
       const labelKey = `${name}|${Math.round(placement.x / 18)}|${Math.round(placement.y / 18)}`
       if (seenLabels.has(labelKey)) continue
       seenLabels.add(labelKey)
@@ -996,7 +1116,7 @@ export async function exportMapSvg(args: ExportSvgArgs) {
 
     if (category === 'Points' || geometry?.type === 'Point' && feature.layer?.type === 'circle') {
       const placement = labelPlacement(map, geometry, sx, sy)
-      if (!placement) continue
+      if (!placement || !pointInsideCanvas(placement, width, height)) continue
       const radius = Number(styleValue(map, layerId, 'paint', 'circle-radius', properties, 3)) * strokeScale
       const fill = String(styleValue(map, layerId, 'paint', 'circle-color', properties, args.theme.featured))
       groups.get('Points')!.push(
@@ -1005,7 +1125,7 @@ export async function exportMapSvg(args: ExportSvgArgs) {
       continue
     }
 
-    const d = geometryPath(map, geometry, sx, sy)
+    const d = geometryPath(map, geometry, sx, sy, width, height)
     if (!d) continue
 
     if (feature.layer?.type === 'fill' || ['Water','Parks','Buildings','Land Details'].includes(category) && /Polygon/.test(geometry?.type || '')) {
@@ -1059,7 +1179,7 @@ export async function exportMapSvg(args: ExportSvgArgs) {
       const segmentNumber = ++road.count
       const segmentName = `${identity.label} - Segment ${String(segmentNumber).padStart(2,'0')}`
       road.items.push(
-        `<path id="${svgId(identity.label)}-segment-${String(segmentNumber).padStart(2,'0')}-${++objectNumber}" data-name="${escapeXml(segmentName)}" data-road-name="${escapeXml(identity.label)}" data-road-class="${escapeXml(identity.roadClass)}" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${Number.isFinite(opacity)?opacity:1}" stroke-linecap="round" stroke-linejoin="round"/>`
+        `<path id="${svgId(segmentName)}_${++objectNumber}" data-name="${escapeXml(segmentName)}" data-road-name="${escapeXml(identity.label)}" data-road-class="${escapeXml(identity.roadClass)}" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${Number.isFinite(opacity)?opacity:1}" stroke-linecap="round" stroke-linejoin="round"/>`
       )
     } else {
       groups.get(category)!.push(
@@ -1070,8 +1190,8 @@ export async function exportMapSvg(args: ExportSvgArgs) {
 
   for (const place of args.featuredPlaces) {
     const point = projectCoordinate(map, [place.lng, place.lat], sx, sy)
-    if (point.x < -30 || point.x > width + 30 || point.y < -30 || point.y > height + 30) continue
     const markerRadius = Math.max(2, 5 * strokeScale)
+    if (point.x - markerRadius < 0 || point.x + markerRadius > width || point.y - markerRadius < 0 || point.y + markerRadius > height) continue
     groups.get('Featured Markers')!.push(
       `<circle id="featured-marker-${++objectNumber}" data-name="${escapeXml(place.name)}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="${markerRadius.toFixed(2)}" fill="${escapeXml(args.theme.featured)}" stroke="${escapeXml(args.theme.featuredHalo)}" stroke-width="${Math.max(1,2*strokeScale).toFixed(2)}"/>`
     )
@@ -1085,21 +1205,21 @@ export async function exportMapSvg(args: ExportSvgArgs) {
       const roads = [...(namedRoadGroups.get(name)?.values() || [])]
         .sort((a,b) => a.label.localeCompare(b.label))
         .map((road, roadIndex) => {
-          const groupId = `${svgId(name)}-${svgId(road.label)}-${String(roadIndex + 1).padStart(2,'0')}`
-          return `<g id="${groupId}" data-name="${escapeXml(road.label)}" data-road-class="${escapeXml(road.roadClass)}">${road.items.join('')}</g>`
+          const groupId = `${svgId(road.label)}_${String(roadIndex + 1).padStart(2,'0')}`
+          return `<g id="${groupId}" data-name="${escapeXml(road.label)}" inkscape:groupmode="layer" inkscape:label="${escapeXml(road.label)}" data-road-class="${escapeXml(road.roadClass)}">${road.items.join('')}</g>`
         })
         .join('')
-      return `<g id="${svgId(name)}" data-name="${escapeXml(name)}">${roads}</g>`
+      return `<g id="${svgId(name)}" data-name="${escapeXml(name)}" inkscape:groupmode="layer" inkscape:label="${escapeXml(name)}">${roads}</g>`
     }
 
     const items = groups.get(name) || []
-    return `<g id="${svgId(name)}" data-name="${escapeXml(name)}">${items.join('')}</g>`
+    return `<g id="${svgId(name)}" data-name="${escapeXml(name)}" inkscape:groupmode="layer" inkscape:label="${escapeXml(name)}">${items.join('')}</g>`
   }).join('')
 
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${width} ${height}" shape-rendering="geometricPrecision" overflow="visible">
-  <g id="map-artwork" data-name="Map Artwork">
-    <rect id="land-background" x="0" y="0" width="${width}" height="${height}" fill="${escapeXml(args.theme.land)}"/>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${width} ${height}" shape-rendering="geometricPrecision">
+  <g id="Map_Artwork" data-name="Map Artwork" inkscape:groupmode="layer" inkscape:label="Map Artwork">
+    <rect id="Land_Background" x="0" y="0" width="${width}" height="${height}" fill="${escapeXml(args.theme.land)}"/>
     ${orderedGroups}
   </g>
 </svg>`
