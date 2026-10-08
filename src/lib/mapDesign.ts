@@ -1,6 +1,6 @@
 import type { Map, StyleSpecification } from 'maplibre-gl'
 import { ensureRoadRepairLayers, type RoadRepair } from './roadRepairs'
-import { ensureRoadChoiceLayers, visibleRoadAppearance, type RoadOverride } from './roadChoices'
+import { ensureRoadChoiceLayers, visibleRoadAppearance, projectIncludedRoad, includedRoadCoordinates, type RoadOverride } from './roadChoices'
 
 export const BASE_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty'
 export const FEATURED_SOURCE_ID = 'strictons-featured-places'
@@ -651,16 +651,12 @@ async function renderMapCanvas(args: ExportMapArgs) {
       ctx.lineJoin='round'
       for(const choice of args.roadChoices){
         if(choice.mode!=='show'||choice.coordinates.length<2)continue
-        const appearance=visibleRoadAppearance(args.theme,choice.category,exportMap.getZoom())
+        const appearance=visibleRoadAppearance(args.theme,choice.category,exportMap.getZoom(),exportMap,choice.roadClass,choice.coordinates)
         ctx.beginPath()
-        choice.coordinates.forEach((coordinate,index)=>{
-          const p=exportMap.project(coordinate)
+        projectIncludedRoad(exportMap,choice).forEach((p,index)=>{
           if(index===0)ctx.moveTo(p.x,p.y)
           else ctx.lineTo(p.x,p.y)
         })
-        ctx.strokeStyle=appearance.casing
-        ctx.lineWidth=appearance.casingWidth
-        ctx.stroke()
         ctx.strokeStyle=appearance.colour
         ctx.lineWidth=appearance.width
         ctx.stroke()
@@ -1509,7 +1505,7 @@ export async function exportMapSvg(args: ExportSvgArgs) {
 
   for(const choice of args.roadChoices){
     if(choice.mode!=='show' || !roadCategories.has(choice.category))continue
-    const geometry={type:'LineString',coordinates:choice.coordinates}
+    const geometry={type:'LineString',coordinates:includedRoadCoordinates(map,choice)}
     const d=geometryPath(map,geometry,sx,sy,width,height)
     if(!d)continue
     const roads=namedRoadGroups.get(choice.category)!
@@ -1520,13 +1516,10 @@ export async function exportMapSvg(args: ExportSvgArgs) {
       roads.set(key,road)
     }
     const number=++road.count
-    const appearance=visibleRoadAppearance(args.theme,choice.category,map.getZoom())
+    const appearance=visibleRoadAppearance(args.theme,choice.category,map.getZoom(),map,choice.roadClass,choice.coordinates)
     const pathId=svgId('Always Show '+choice.name)+'_'+String(number).padStart(2,'0')+'_'+(++objectNumber)
     road.items.push(
-      '<g id="'+pathId+'" data-name="'+escapeXml(choice.name)+' (always show)" data-road-class="'+escapeXml(choice.roadClass)+'">'+
-      '<path id="'+pathId+'_Casing" d="'+d+'" fill="none" stroke="'+escapeXml(appearance.casing)+'" stroke-width="'+(appearance.casingWidth*strokeScale).toFixed(2)+'" stroke-linecap="round" stroke-linejoin="round"/>'+
-      '<path id="'+pathId+'_Road" d="'+d+'" fill="none" stroke="'+escapeXml(appearance.colour)+'" stroke-width="'+(appearance.width*strokeScale).toFixed(2)+'" stroke-linecap="round" stroke-linejoin="round"/>'+
-      '</g>'
+      '<path id="'+pathId+'" data-name="'+escapeXml(choice.name)+' (always show)" data-road-class="'+escapeXml(choice.roadClass)+'" d="'+d+'" fill="none" stroke="'+escapeXml(appearance.colour)+'" stroke-width="'+(appearance.width*strokeScale).toFixed(2)+'" stroke-linecap="round" stroke-linejoin="round"/>'
     )
   }
 
