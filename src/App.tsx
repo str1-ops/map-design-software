@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import * as maplibregl from 'maplibre-gl'
 import type { Map as MapLibreMap } from 'maplibre-gl'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url'
@@ -8,10 +8,11 @@ import {
   type CameraState, type FeaturedPlace, type LayerVisibility,
   type MapTheme, type PrintSize,
 } from './lib/mapDesign'
+import { ensureRoadRepairLayers, findRoadRepairs, type RoadSelection, type RoadRepair } from './lib/roadRepairs'
 
 maplibregl.setWorkerUrl(workerUrl)
 
-type Project = { name:string; size:PrintSize; theme:MapTheme; visible:LayerVisibility; places:FeaturedPlace[]; camera:CameraState }
+type Project = { name:string; size:PrintSize; theme:MapTheme; visible:LayerVisibility; places:FeaturedPlace[]; repairs:RoadRepair[]; camera:CameraState }
 type SearchResult = { place_id:number; display_name:string; lat:string; lon:string; type?:string }
 
 const DEFAULTS: Project = {
@@ -19,7 +20,7 @@ const DEFAULTS: Project = {
   size:{ widthMm:203, heightMm:185, bleedMm:3, dpi:300 },
   theme:DEFAULT_THEME,
   visible:{ roads:true, minorRoads:true, railways:true, buildings:true, parks:true, boundaries:false, labels:true, placeLabels:true, roadLabels:true, poiLabels:false, waterLabels:true },
-  places:[], camera:{ center:[151.544,-33.263], zoom:11.2, bearing:0, pitch:0 },
+  places:[], repairs:[], camera:{ center:[151.544,-33.263], zoom:11.2, bearing:0, pitch:0 },
 }
 const PRESETS = [
   ['Beachcomber spread',203,185],['Beachcomber page',101.5,185],['A4 landscape',297,210],['A4 portrait',210,297],
@@ -28,7 +29,7 @@ const STORE='strictons-map-studio-v1'
 let lastSearch=0
 
 function load():Project {
-  try { const p=JSON.parse(localStorage.getItem(STORE)||'null'); return p ? {...DEFAULTS,...p,size:{...DEFAULTS.size,...p.size},theme:{...DEFAULT_THEME,...p.theme},visible:{...DEFAULTS.visible,...p.visible},camera:{...DEFAULTS.camera,...p.camera}} : DEFAULTS } catch { return DEFAULTS }
+  try { const p=JSON.parse(localStorage.getItem(STORE)||'null'); return p ? {...DEFAULTS,...p,size:{...DEFAULTS.size,...p.size},theme:{...DEFAULT_THEME,...p.theme},visible:{...DEFAULTS.visible,...p.visible},repairs:Array.isArray(p.repairs)?p.repairs:[],camera:{...DEFAULTS.camera,...p.camera}} : DEFAULTS } catch { return DEFAULTS }
 }
 function fileName(s:string){ return s.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || 'map' }
 
@@ -39,27 +40,162 @@ function Colour({label,value,onChange}:{label:string;value:string;onChange:(v:st
   return <label className="colour"><span>{label}</span><div><input type="color" value={value} onChange={e=>onChange(e.target.value)}/><code>{value.toUpperCase()}</code></div></label>
 }
 
-function MapView({project,pick,onCamera,onPick,onViewport,onMapReady}:{project:Project;pick:boolean;onCamera:(c:CameraState)=>void;onPick:(p:FeaturedPlace)=>void;onViewport:(v:{width:number;height:number})=>void;onMapReady:(map:MapLibreMap|null)=>void}){
-  const host=useRef<HTMLDivElement>(null), mapRef=useRef<MapLibreMap|null>(null), latest=useRef({onCamera,onPick,onViewport,onMapReady})
-  latest.current={onCamera,onPick,onViewport,onMapReady}
+function MapView({project,pick,locked,selecting,selection,onCamera,onPick,onViewport,onMapReady,onSelection}:{
+  project:Project;pick:boolean;locked:boolean;selecting:boolean;selection:RoadSelection|null;
+  onCamera:(c:CameraState)=>void;onPick:(p:FeaturedPlace)=>void;
+  onViewport:(v:{width:number;height:number})=>void;
+  onMapReady:(map:MapLibreMap|null)=>void;
+  onSelection:(area:RoadSelection|null)=>void
+}){
+  const host=useRef<HTMLDivElement>(null),mapRef=useRef<MapLibreMap|null>(null)
+  const latest=useRef({onCamera,onPick,onViewport,onMapReady,onSelection})
+  latest.current={onCamera,onPick,onViewport,onMapReady,onSelection}
+  const pointerStart=useRef<{x:number;y:number}|null>(null)
+  const [drag,setDrag]=useState<{left:number;top:number;width:number;height:number}|null>(null)
+
   useEffect(()=>{
     if(!host.current || mapRef.current) return
-    const map=new maplibregl.Map({container:host.current,style:BASE_STYLE_URL,center:project.camera.center,zoom:project.camera.zoom,bearing:0,pitch:0,attributionControl:false,canvasContextAttributes:{preserveDrawingBuffer:true}})
+    const map=new maplibregl.Map({
+      container:host.current,style:BASE_STYLE_URL,center:project.camera.center,
+      zoom:project.camera.zoom,bearing:project.camera.bearing,pitch:project.camera.pitch,
+      attributionControl:false,canvasContextAttributes:{preserveDrawingBuffer:true}
+    })
     mapRef.current=map
     latest.current.onMapReady(map)
-    const syncViewport=()=>{ map.resize(); if(host.current) latest.current.onViewport({width:host.current.clientWidth,height:host.current.clientHeight}) }
-    const ro=new ResizeObserver(syncViewport); ro.observe(host.current)
-    map.on('load',()=>{ syncViewport(); applyMapDesign(map,project.theme,project.visible); ensureFeaturedLayers(map,project.places,project.theme) })
-    map.on('moveend',()=>{ const c=map.getCenter(); latest.current.onCamera({center:[c.lng,c.lat],zoom:map.getZoom(),bearing:map.getBearing(),pitch:map.getPitch()}) })
-    map.on('click',e=>{ if(map.getCanvas().dataset.pick!=='1') return; latest.current.onPick({id:crypto.randomUUID(),name:guessFeatureName(map,e),lng:e.lngLat.lng,lat:e.lngLat.lat,category:'Featured'}) })
-    return ()=>{ ro.disconnect(); latest.current.onMapReady(null); map.remove(); mapRef.current=null }
+    const syncViewport=()=>{
+      map.resize()
+      if(host.current)latest.current.onViewport({width:host.current.clientWidth,height:host.current.clientHeight})
+    }
+    const ro=new ResizeObserver(syncViewport)
+    ro.observe(host.current)
+    map.on('load',()=>{
+      syncViewport()
+      applyMapDesign(map,project.theme,project.visible)
+      ensureRoadRepairLayers(map,project.repairs,project.theme,project.visible)
+      ensureFeaturedLayers(map,project.places,project.theme)
+    })
+    map.on('moveend',()=>{
+      const c=map.getCenter()
+      latest.current.onCamera({center:[c.lng,c.lat],zoom:map.getZoom(),bearing:map.getBearing(),pitch:map.getPitch()})
+    })
+    map.on('click',e=>{
+      if(map.getCanvas().dataset.pick!=='1')return
+      latest.current.onPick({
+        id:crypto.randomUUID(),name:guessFeatureName(map,e),
+        lng:e.lngLat.lng,lat:e.lngLat.lat,category:'Featured'
+      })
+    })
+    return ()=>{
+      ro.disconnect()
+      latest.current.onMapReady(null)
+      map.remove()
+      mapRef.current=null
+    }
   },[])
-  useEffect(()=>{ const m=mapRef.current; if(m){m.getCanvas().dataset.pick=pick?'1':'';m.getCanvas().style.cursor=pick?'crosshair':''}},[pick])
-  useEffect(()=>{ const m=mapRef.current;if(m?.isStyleLoaded()){applyMapDesign(m,project.theme,project.visible);ensureFeaturedLayers(m,project.places,project.theme)}},[project.theme,project.visible,project.places])
-  useEffect(()=>{ const m=mapRef.current;if(!m)return;requestAnimationFrame(()=>m.resize()) },[project.size.widthMm,project.size.heightMm,project.size.bleedMm])
-  useEffect(()=>{ const m=mapRef.current;if(!m)return;const c=m.getCenter();if(Math.abs(c.lng-project.camera.center[0])>.0001||Math.abs(c.lat-project.camera.center[1])>.0001||Math.abs(m.getZoom()-project.camera.zoom)>.01)m.easeTo({center:project.camera.center,zoom:project.camera.zoom,duration:450})},[project.camera.center,project.camera.zoom])
-  const tw=project.size.widthMm+project.size.bleedMm*2, th=project.size.heightMm+project.size.bleedMm*2, bx=project.size.bleedMm/tw*100, by=project.size.bleedMm/th*100
-  return <><div className="paper"><div ref={host} className="map"/>{project.size.bleedMm>0&&<div className="trim" style={{inset:`${by}% ${bx}%`}}/>}</div><div className="map-tools"><button type="button" onClick={()=>mapRef.current?.zoomIn({duration:220})} aria-label="Zoom in">+</button><button type="button" onClick={()=>mapRef.current?.zoomOut({duration:220})} aria-label="Zoom out">−</button></div><div className="canvas-meta">{project.size.widthMm} × {project.size.heightMm} mm</div>{pick&&<div className="pick-chip">Click a place on the map</div>}</>
+
+  useEffect(()=>{
+    const m=mapRef.current
+    if(m){
+      m.getCanvas().dataset.pick=pick?'1':''
+      m.getCanvas().style.cursor=pick?'crosshair':''
+    }
+  },[pick])
+  useEffect(()=>{
+    const m=mapRef.current
+    if(m?.isStyleLoaded()){
+      applyMapDesign(m,project.theme,project.visible)
+      ensureRoadRepairLayers(m,project.repairs,project.theme,project.visible)
+      ensureFeaturedLayers(m,project.places,project.theme)
+    }
+  },[project.theme,project.visible,project.places,project.repairs])
+  useEffect(()=>{
+    const m=mapRef.current
+    if(m)requestAnimationFrame(()=>m.resize())
+  },[project.size.widthMm,project.size.heightMm,project.size.bleedMm])
+  useEffect(()=>{
+    const m=mapRef.current
+    if(!m||locked)return
+    const c=m.getCenter()
+    if(Math.abs(c.lng-project.camera.center[0])>.0001||
+       Math.abs(c.lat-project.camera.center[1])>.0001||
+       Math.abs(m.getZoom()-project.camera.zoom)>.01){
+      m.easeTo({center:project.camera.center,zoom:project.camera.zoom,duration:450})
+    }
+  },[project.camera.center,project.camera.zoom,locked])
+
+  const mouseLocation=(event:ReactPointerEvent<HTMLDivElement>)=>{
+    const rect=event.currentTarget.getBoundingClientRect()
+    return {
+      x:Math.max(0,Math.min(rect.width,event.clientX-rect.left)),
+      y:Math.max(0,Math.min(rect.height,event.clientY-rect.top))
+    }
+  }
+  const onPointerDown=(event:ReactPointerEvent<HTMLDivElement>)=>{
+    if(event.button!==0)return
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    const point=mouseLocation(event)
+    pointerStart.current=point
+    setDrag({left:point.x,top:point.y,width:0,height:0})
+  }
+  const onPointerMove=(event:ReactPointerEvent<HTMLDivElement>)=>{
+    if(!pointerStart.current)return
+    const p=mouseLocation(event),start=pointerStart.current
+    setDrag({
+      left:Math.min(start.x,p.x),top:Math.min(start.y,p.y),
+      width:Math.abs(start.x-p.x),height:Math.abs(start.y-p.y)
+    })
+  }
+  const onPointerUp=(event:ReactPointerEvent<HTMLDivElement>)=>{
+    const start=pointerStart.current
+    if(!start)return
+    pointerStart.current=null
+    const end=mouseLocation(event)
+    const m=mapRef.current
+    setDrag(null)
+    if(!m||Math.abs(end.x-start.x)<8||Math.abs(end.y-start.y)<8){
+      latest.current.onSelection(null)
+      return
+    }
+    const a=m.unproject([start.x,start.y])
+    const b=m.unproject([end.x,end.y])
+    latest.current.onSelection({
+      west:Math.min(a.lng,b.lng),east:Math.max(a.lng,b.lng),
+      south:Math.min(a.lat,b.lat),north:Math.max(a.lat,b.lat)
+    })
+  }
+  const selectionRect=(()=>{
+    if(!selection||!mapRef.current)return null
+    const a=mapRef.current.project([selection.west,selection.north])
+    const b=mapRef.current.project([selection.east,selection.south])
+    return {left:Math.min(a.x,b.x),top:Math.min(a.y,b.y),
+      width:Math.abs(b.x-a.x),height:Math.abs(b.y-a.y)}
+  })()
+  const tw=project.size.widthMm+project.size.bleedMm*2
+  const th=project.size.heightMm+project.size.bleedMm*2
+  const bx=project.size.bleedMm/tw*100
+  const by=project.size.bleedMm/th*100
+
+  return <>
+    <div className="paper">
+      <div ref={host} className="map"/>
+      {selectionRect&&!selecting&&<div className="repair-area" style={selectionRect}/>}
+      {selecting&&<div className="repair-selector" onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove} onPointerUp={onPointerUp}
+        onPointerCancel={()=>{pointerStart.current=null;setDrag(null)}}>
+        {drag&&<div className="repair-area" style={drag}/>}
+      </div>}
+      {project.size.bleedMm>0&&<div className="trim" style={{inset:by+'% '+bx+'%'}}/>}
+    </div>
+    <div className="map-tools">
+      <button type="button" onClick={()=>mapRef.current?.zoomIn({duration:220})} aria-label="Zoom in">+</button>
+      <button type="button" onClick={()=>mapRef.current?.zoomOut({duration:220})} aria-label="Zoom out">−</button>
+    </div>
+    <div className="canvas-meta">{project.size.widthMm} × {project.size.heightMm} mm{locked?' · Saved canvas locked':''}</div>
+    {pick&&<div className="pick-chip">Click a place on the map</div>}
+    {selecting&&<div className="pick-chip">Drag a rectangle around the incomplete roads</div>}
+  </>
 }
 
 async function geocode(q:string):Promise<SearchResult[]> {
