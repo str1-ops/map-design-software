@@ -1,5 +1,6 @@
 import type { Map, StyleSpecification } from 'maplibre-gl'
 import { ensureRoadRepairLayers, type RoadRepair } from './roadRepairs'
+import { ensureRoadChoiceLayers, type RoadOverride } from './roadChoices'
 
 export const BASE_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty'
 export const FEATURED_SOURCE_ID = 'strictons-featured-places'
@@ -573,6 +574,7 @@ type ExportMapArgs = {
   visibility: LayerVisibility
   featuredPlaces: FeaturedPlace[]
   repairs: RoadRepair[]
+  roadChoices: RoadOverride[]
 }
 
 type ExportSvgArgs = ExportMapArgs & {
@@ -622,6 +624,7 @@ async function renderMapCanvas(args: ExportMapArgs) {
         applyMapDesign(exportMap, args.theme, args.visibility)
         ensureFeaturedLayers(exportMap, args.featuredPlaces, args.theme)
         ensureRoadRepairLayers(exportMap, args.repairs, args.theme, args.visibility)
+        ensureRoadChoiceLayers(exportMap, args.roadChoices, null, args.theme, args.visibility)
         exportMap.once('idle', () => {
           window.clearTimeout(timeout)
           resolve()
@@ -885,6 +888,86 @@ function geometryPath(map: Map, geometry: any, sx: number, sy: number, width: nu
     })).filter(Boolean).join(' ')
   }
   return ''
+}
+
+function omitHiddenRoadSections(
+  map: Map, geometry: any, sx:number, sy:number, width:number, height:number,
+  category:string, choices:RoadOverride[]
+):string {
+  const hides=choices.filter((item)=>item.mode==='hide'&&item.category===category&&item.coordinates.length>1)
+  if(!hides.length)return geometryPath(map,geometry,sx,sy,width,height)
+
+  const lines:any[][]=geometry?.type==='LineString'?[geometry.coordinates]:
+    geometry?.type==='MultiLineString'?geometry.coordinates:[]
+  if(!lines.length)return geometryPath(map,geometry,sx,sy,width,height)
+  type RoadP={x:number;y:number}
+  const projected=hides.map((choice)=>{
+    const points=choice.coordinates.map((coordinate)=>{
+      const p=map.project(coordinate)
+      return {x:p.x,y:p.y}
+    })
+    const x=points.map(p=>p.x),y=points.map(p=>p.y)
+    return {points,left:Math.min(...x)-4,right:Math.max(...x)+4,
+      top:Math.min(...y)-4,bottom:Math.max(...y)+4}
+  })
+  const shouldHide=(p:RoadP,dx:number,dy:number)=>{
+    const length=Math.hypot(dx,dy)
+    if(length<.001)return false
+    for(const hide of projected){
+      if(p.x<hide.left||p.x>hide.right||p.y<hide.top||p.y>hide.bottom)continue
+      for(let i=1;i<hide.points.length;i++){
+        const a=hide.points[i-1],b=hide.points[i]
+        const hx=b.x-a.x,hy=b.y-a.y,hlen=Math.hypot(hx,hy)
+        if(hlen<.001)continue
+        const alignment=Math.abs((hx*dx+hy*dy)/(hlen*length))
+        if(alignment<0.88)continue
+        const t=Math.max(0,Math.min(1,((p.x-a.x)*hx+(p.y-a.y)*hy)/(hlen*hlen)))
+        const dist=Math.hypot(p.x-a.x-hx*t,p.y-a.y-hy*t)
+        if(dist<=3)return true
+      }
+    }
+    return false
+  }
+  const result:string[]=[]
+  for(const line of lines){
+    const screen:RoadP[]=line.map((coordinate:any)=>{
+      const p=map.project(coordinate)
+      return {x:p.x,y:p.y}
+    })
+    if(screen.length<2)continue
+    const bounds={
+      left:Math.min(...screen.map(p=>p.x)),right:Math.max(...screen.map(p=>p.x)),
+      top:Math.min(...screen.map(p=>p.y)),bottom:Math.max(...screen.map(p=>p.y))
+    }
+    if(!projected.some(h=>h.right>=bounds.left&&h.left<=bounds.right&&h.bottom>=bounds.top&&h.top<=bounds.bottom)){
+      result.push(clippedPolylinePath(screen.map((p)=>({x:p.x*sx,y:p.y*sy})),width,height))
+      continue
+    }
+    let path:RoadP[]=[]
+    const flush=()=>{
+      if(path.length>1)result.push(clippedPolylinePath(path.map(p=>({x:p.x*sx,y:p.y*sy})),width,height))
+      path=[]
+    }
+    for(let i=1;i<screen.length;i++){
+      const a=screen[i-1],b=screen[i],dx=b.x-a.x,dy=b.y-a.y
+      const steps=Math.min(1000,Math.max(1,Math.ceil(Math.hypot(dx,dy)/2)))
+      for(let s=0;s<steps;s++){
+        const t0=s/steps,t1=(s+1)/steps
+        const start={x:a.x+dx*t0,y:a.y+dy*t0}
+        const end={x:a.x+dx*t1,y:a.y+dy*t1}
+        const mid={x:(start.x+end.x)/2,y:(start.y+end.y)/2}
+        if(shouldHide(mid,dx,dy)){flush();continue}
+        if(!path.length)path.push(start)
+        else {
+          const last=path[path.length-1]
+          if(Math.hypot(last.x-start.x,last.y-start.y)>.05){flush();path.push(start)}
+        }
+        path.push(end)
+      }
+    }
+    flush()
+  }
+  return result.filter(Boolean).join(' ')
 }
 
 function lineLabelPlacement(map: Map, coordinates: any[], sx: number, sy: number) {
@@ -1207,6 +1290,7 @@ export async function exportMapSvg(args: ExportSvgArgs) {
           applyMapDesign(snapshot,args.theme,args.visibility)
           ensureFeaturedLayers(snapshot,args.featuredPlaces,args.theme)
           ensureRoadRepairLayers(snapshot,args.repairs,args.theme,args.visibility)
+          ensureRoadChoiceLayers(snapshot,args.roadChoices,null,args.theme,args.visibility)
           snapshot.once('idle',()=>{window.clearTimeout(timeout);resolve()})
         })
         snapshot.once('error',(event:any)=>{
@@ -1305,7 +1389,9 @@ export async function exportMapSvg(args: ExportSvgArgs) {
       continue
     }
 
-    const d = geometryPath(map, geometry, sx, sy, width, height)
+    const d = roadCategories.has(category)
+      ? omitHiddenRoadSections(map, geometry, sx, sy, width, height, category, args.roadChoices)
+      : geometryPath(map, geometry, sx, sy, width, height)
     if (!d) continue
 
     if (feature.layer?.type === 'fill' || ['Water','Parks','Buildings','Land Details'].includes(category) && /Polygon/.test(geometry?.type || '')) {
@@ -1373,7 +1459,7 @@ export async function exportMapSvg(args: ExportSvgArgs) {
   // The map layer is excluded from queryRenderedFeatures, avoiding double export.
   for (const repair of args.repairs) {
     const geometry={type:'LineString',coordinates:repair.coordinates}
-    const d=geometryPath(map,geometry,sx,sy,width,height)
+    const d=omitHiddenRoadSections(map,geometry,sx,sy,width,height,repair.category,args.roadChoices)
     if(!d || !roadCategories.has(repair.category))continue
     const categoryRoads=namedRoadGroups.get(repair.category)!
     const key='repair|'+repair.name.toLowerCase()+'|'+repair.roadClass
@@ -1391,6 +1477,32 @@ export async function exportMapSvg(args: ExportSvgArgs) {
       '<path id="'+svgId('Verified Repair '+repair.name)+'_'+String(number).padStart(2,'0')+'_'+(++objectNumber)+
       '" data-name="'+escapeXml(repair.name)+' (verified road repair)" data-road-class="'+escapeXml(repair.roadClass)+
       '" d="'+d+'" fill="none" stroke="'+escapeXml(fill)+'" stroke-width="'+Math.max(0.2,fallback*strokeScale).toFixed(2)+
+      '" stroke-linecap="round" stroke-linejoin="round"/>'
+    )
+  }
+
+  for(const choice of args.roadChoices){
+    if(choice.mode!=='show' || !roadCategories.has(choice.category))continue
+    const geometry={type:'LineString',coordinates:choice.coordinates}
+    const d=geometryPath(map,geometry,sx,sy,width,height)
+    if(!d)continue
+    const roads=namedRoadGroups.get(choice.category)!
+    const key='always|'+choice.name.toLowerCase()+'|'+choice.roadClass
+    let road=roads.get(key)
+    if(!road){
+      road={label:choice.name,roadClass:choice.roadClass,items:[],count:0}
+      roads.set(key,road)
+    }
+    const number=++road.count
+    const widthScale=choice.category==='Highways'?args.theme.highwayWidthScale:
+      choice.category==='Major Roads'?args.theme.roadWidthScale:args.theme.minorRoadWidthScale
+    const colour=choice.category==='Highways'?args.theme.highways:
+      choice.category==='Major Roads'?args.theme.roads:args.theme.minorRoads
+    const base=choice.category==='Highways'?2.4:choice.category==='Major Roads'?1.6:0.85
+    road.items.push(
+      '<path id="'+svgId('Always Show '+choice.name)+'_'+String(number).padStart(2,'0')+'_'+(++objectNumber)+
+      '" data-name="'+escapeXml(choice.name)+' (always show)" data-road-class="'+escapeXml(choice.roadClass)+
+      '" d="'+d+'" fill="none" stroke="'+escapeXml(colour)+'" stroke-width="'+Math.max(0.2,base*widthScale*strokeScale).toFixed(2)+
       '" stroke-linecap="round" stroke-linejoin="round"/>'
     )
   }
