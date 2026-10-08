@@ -11,6 +11,7 @@ import {
 import { ensureRoadRepairLayers, findRoadRepairs, type RoadSelection, type RoadRepair } from './lib/roadRepairs'
 import { ensureRoadChoiceLayers, selectRoadAt, adjustRoadSelection, type RoadOverride, type SelectedRoad } from './lib/roadChoices'
 import RoadSelectionOverlay from './components/RoadSelectionOverlay'
+import RoadVisibilityOverlay from './components/RoadVisibilityOverlay'
 
 maplibregl.setWorkerUrl(workerUrl)
 
@@ -194,6 +195,8 @@ function MapView({project,pick,locked,selecting,selection,roadPicking,selectedRo
   return <>
     <div className="paper">
       <div ref={host} className="map"/>
+      <RoadVisibilityOverlay map={mapRef.current} choices={project.roadChoices}
+        theme={project.theme} visibility={project.visible}/>
       {roadPicking && !selecting && selectedRoad &&
         <RoadSelectionOverlay map={mapRef.current} road={selectedRoad}
           boundary={editingBoundary} onJunctionClick={onJunctionClick}
