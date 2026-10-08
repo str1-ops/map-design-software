@@ -246,7 +246,7 @@ function extendRoad(base:RoadLine,all:RoadLine[]):[number,number][] {
   return cleanLine(route)
 }
 
-function roadJunctions(map:Map,route:[number,number][],all:RoadLine[]):RoadJunction[] {
+function roadJunctions(route:[number,number][],all:RoadLine[]):RoadJunction[] {
   const lookup=new Map<string,{index:number;directions:number[]}[]>()
   const key=(coord:[number,number])=>coord[0].toFixed(6)+','+coord[1].toFixed(6)
   for(let i=0;i<route.length;i++){
@@ -335,7 +335,7 @@ export function selectRoadAt(map:Map,click:{x:number;y:number}):SelectedRoad|nul
   const initialEdge=bestCoordinate[bestSegment]
   const nextEdge=bestCoordinate[bestSegment+1]
   const routeCoordinates=extendRoad(nearest,lines)
-  const junctions=roadJunctions(map,routeCoordinates,lines)
+  const junctions=roadJunctions(routeCoordinates,lines)
   let hitSegment=0,bestDistance=Infinity
   const midpoint:[number,number]=[(initialEdge[0]+nextEdge[0])/2,(initialEdge[1]+nextEdge[1])/2]
   const hit=point(map,midpoint)
@@ -394,15 +394,47 @@ export function ensureRoadChoiceLayers(
   if(selectedSource)selectedSource.setData(collection(selected?[selected]:[]))
   else map.addSource(SELECT_SOURCE,{type:'geojson',data:collection(selected?[selected]:[])} as any)
 
+  // Up to five junctions beyond each endpoint are shown, plus every junction
+  // within the selection. Larger routes will not flood the map with markers.
+  const marks=selected?selected.junctions.filter((junction,index,all)=>{
+    const start=all.findIndex(item=>item.index===selected.startIndex)
+    const end=all.findIndex(item=>item.index===selected.endIndex)
+    return index>=Math.max(0,start-5)&&index<=Math.min(all.length-1,end+5)
+  }):[]
+  const pointData={
+    type:'FeatureCollection' as const,
+    features:marks.map(junction=>({
+      type:'Feature' as const,
+      properties:{
+        index:junction.index,
+        kind:junction.kind,
+        role: selected && junction.index===selected.startIndex?'start':
+          selected && junction.index===selected.endIndex?'end':'junction'
+      },
+      geometry:{type:'Point' as const,coordinates:junction.coordinates}
+    }))
+  }
+  const junctionSource=map.getSource(JUNCTION_SOURCE) as any
+  if(junctionSource)junctionSource.setData(pointData)
+  else map.addSource(JUNCTION_SOURCE,{type:'geojson',data:pointData} as any)
+
   // Above land detail and roads, below labels. OSM geometry remains unchanged.
   const firstLabel=(map.getStyle().layers as any[]).find((layer)=>layer.type==='symbol'&&!String(layer.id).startsWith('strictons-'))?.id
-  const add=(id:string,sourceId:string,filter:any,paint:any)=>{
+  const add=(id:string,sourceId:string,filter:any,paint:any,top=false)=>{
     if(!map.getLayer(id)){
       map.addLayer({
         id,type:'line',source:sourceId,filter,
         layout:{'line-cap':'round','line-join':'round'},
         paint
-      } as any,firstLabel)
+      } as any,top?undefined:firstLabel)
+    }
+  }
+  const addPoint=(id:string,paint:any)=>{
+    if(!map.getLayer(id)){
+      map.addLayer({
+        id,type:'circle',source:JUNCTION_SOURCE,
+        paint
+      } as any)
     }
   }
   add(HIDE,SOURCE,['==',['get','mode'],'hide'],
@@ -410,9 +442,23 @@ export function ensureRoadChoiceLayers(
   add(SHOW,SOURCE,['==',['get','mode'],'show'],
     {'line-color':themeColour(theme),'line-width':themeWidth(theme)})
   add(SELECT_HALO,SELECT_SOURCE,undefined,
-    {'line-color':'#ffffff','line-opacity':0.98,'line-width':11})
+    {'line-color':'#ffffff','line-opacity':1,'line-width':14},true)
   add(SELECT_LINE,SELECT_SOURCE,undefined,
-    {'line-color':'#1e7657','line-width':5,'line-opacity':1})
+    {'line-color':'#1378ed','line-width':7,'line-opacity':1},true)
+  addPoint(JUNCTION_MARKERS,{
+    'circle-radius':['match',['get','role'],'start',9,'end',9,6.5],
+    'circle-color':['match',['get','role'],'start','#075bbd','end','#1378ed','#a7d5ff'],
+    'circle-stroke-width':2.5,
+    'circle-stroke-color':'#ffffff',
+    'circle-opacity':1
+  })
+  // A generous hit area makes the junctions practical to select on a laptop.
+  addPoint(JUNCTION_HIT_LAYER,{
+    'circle-radius':16,
+    'circle-color':'#1378ed',
+    'circle-opacity':0.005,
+    'circle-stroke-opacity':0
+  })
   const set=(id:string,property:string,value:unknown)=>{
     try{(map as any).setPaintProperty(id,property,value)}catch{/* external style can reload */}
   }
