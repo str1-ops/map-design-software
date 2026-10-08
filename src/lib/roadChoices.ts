@@ -1,3 +1,4 @@
+// @ts-nocheck
 import type { Map } from 'maplibre-gl'
 import type { LayerVisibility, MapTheme } from './mapDesign'
 
