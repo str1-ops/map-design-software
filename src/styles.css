@@ -46,3 +46,78 @@ footer>span{max-width:80%;overflow:hidden;text-overflow:ellipsis;white-space:now
 .junction-options button:hover{border-color:#1378ed;background:#f0f7ff}
 .junction-options button:disabled{opacity:.45;cursor:default}
 .junction-options button span{font-size:8px;color:#8192a2}
+
+/* Road editing is an independent SVG interaction surface, not a MapLibre style layer. */
+.road-selection-overlay{
+  position:absolute;
+  inset:0;
+  display:block;
+  width:100%;
+  height:100%;
+  z-index:8;
+  overflow:hidden;
+  pointer-events:none;
+}
+.road-editor-route{
+  fill:none;
+  stroke:#5eabfa;
+  stroke-width:4;
+  stroke-dasharray:3 9;
+  opacity:.78;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+  pointer-events:none;
+}
+.road-editor-outline{
+  fill:none;
+  stroke:#fff;
+  stroke-width:15;
+  opacity:1;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+  pointer-events:none;
+}
+.road-editor-line{
+  fill:none;
+  stroke:#1378ed;
+  stroke-width:8;
+  opacity:1;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+  pointer-events:none;
+}
+.road-editor-handle{
+  pointer-events:all;
+  cursor:pointer;
+  outline:none;
+}
+.road-editor-handle.invalid{
+  cursor:not-allowed;
+  pointer-events:none;
+}
+.road-editor-hit{
+  fill:transparent;
+  stroke:transparent;
+  pointer-events:all;
+}
+.road-editor-dot{
+  fill:#a7d5ff;
+  stroke:#fff;
+  stroke-width:3;
+  pointer-events:none;
+}
+.road-editor-handle.current .road-editor-dot{
+  fill:#075fce;
+  stroke:#fff;
+  stroke-width:3;
+}
+.road-editor-handle:focus-visible .road-editor-dot,
+.road-editor-handle:hover .road-editor-dot{
+  fill:#0071ff;
+  stroke:#fff;
+  stroke-width:4;
+}
+.road-editor-centre{
+  fill:#fff;
+  pointer-events:none;
+}
