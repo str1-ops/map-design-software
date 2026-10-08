@@ -31,7 +31,8 @@ type RoadLine={
 }
 const roadTypes=new Set(['motorway','trunk','motorway_link','trunk_link','primary','secondary',
   'tertiary','primary_link','secondary_link','tertiary_link','minor','residential','living_street',
-  'unclassified','service','track','path','pedestrian','footway','cycleway'])
+  'unclassified','service','track','path','pedestrian','footway','cycleway',
+  'street','road','living_street','residential','construction'])
 
 function categoryFor(cls:string):RoadCategory {
   if(['motorway','trunk','motorway_link','trunk_link'].includes(cls))return 'Highways'
@@ -71,7 +72,7 @@ function dedupeKey(cls:string, coords:[number,number][]) {
   const b=[...coords].reverse().map((v)=>v.map((x)=>x.toFixed(7)).join(',')).join(';')
   return cls+'|'+(a<b?a:b)
 }
-function sourceRoads(map:Map):RoadLine[] {
+function sourceRoads(map:Map, click?:P):RoadLine[] {
   const sources=new Set<string>()
   const style=map.getStyle()
   for(const layer of style.layers as any[]) {
@@ -98,6 +99,37 @@ function sourceRoads(map:Map):RoadLine[] {
         lines.push({coordinates:coords,points:coords.map((c)=>point(map,c)),
           name:String(props.name || props['name:en'] || props.ref || ''),
           roadClass:cls,category:categoryFor(cls),key})
+      }
+    }
+  }
+  // A rendered-feature fallback is essential for styles/sources that do not expose
+  // all currently drawn roads through querySourceFeatures at a given zoom.
+  if(click){
+    let rendered:any[]=[]
+    try{
+      const pad=16
+      rendered=map.queryRenderedFeatures([
+        [click.x-pad,click.y-pad],[click.x+pad,click.y+pad]
+      ]) as any[]
+    }catch{/* map may still be loading */}
+    for(const feature of rendered){
+      const layerId=String(feature.layer?.id||'').toLowerCase()
+      const src=String(feature.sourceLayer||feature.layer?.['source-layer']||'').toLowerCase()
+      const cls=String(feature.properties?.class||feature.properties?.subclass||'').toLowerCase()
+      if(feature.layer?.type!=='line' || layerId.startsWith('strictons-'))continue
+      if(src!=='transportation' && !/road|street|highway/.test(layerId))continue
+      if(!roadTypes.has(cls))continue
+      for(const geometry of featureLines(feature)){
+        const coords=cleanLine(geometry)
+        if(coords.length<2)continue
+        const key=dedupeKey(cls,coords)
+        if(seen.has(key))continue
+        seen.add(key)
+        lines.push({
+          coordinates:coords,points:coords.map(coord=>point(map,coord)),
+          name:String(feature.properties?.name||feature.properties?.['name:en']||feature.properties?.ref||''),
+          roadClass:cls,category:categoryFor(cls),key
+        })
       }
     }
   }
@@ -178,11 +210,11 @@ function vertexJunctions(line:RoadLine,lines:RoadLine[]) {
   return [...nodes].sort((a,b)=>a-b)
 }
 export function selectRoadAt(map:Map,click:{x:number;y:number}):SelectedRoad|null {
-  if(!map.isStyleLoaded())return null
-  const lines=sourceRoads(map)
   const near:P={x:click.x,y:click.y}
+  const lines=sourceRoads(map,near)
+  if(!lines.length)return null
   let nearest:RoadLine|undefined
-  let best=11
+  let best=15
   let bestSegment=0
   for(const line of lines){
     for(let i=1;i<line.points.length;i++){
@@ -193,7 +225,15 @@ export function selectRoadAt(map:Map,click:{x:number;y:number}):SelectedRoad|nul
     }
   }
   if(!nearest)return null
-  const junctions=vertexJunctions(nearest,lines)
+  // Only examine ways near the clicked way when locating junctions. This also
+  // avoids checking every source-tile road for every vertex on a long route.
+  const xmin=Math.min(...nearest.points.map(p=>p.x))-3
+  const xmax=Math.max(...nearest.points.map(p=>p.x))+3
+  const ymin=Math.min(...nearest.points.map(p=>p.y))-3
+  const ymax=Math.max(...nearest.points.map(p=>p.y))+3
+  const localLines=lines.filter(other=>other===nearest ||
+    other.points.some(p=>p.x>=xmin&&p.x<=xmax&&p.y>=ymin&&p.y<=ymax))
+  const junctions=vertexJunctions(nearest,localLines)
   let from=0,to=nearest.points.length-1
   for(const i of junctions){
     if(i<=bestSegment)from=i
