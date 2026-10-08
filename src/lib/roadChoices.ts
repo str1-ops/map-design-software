@@ -1,4 +1,3 @@
-// @ts-nocheck
 import type { Map } from 'maplibre-gl'
 import type { LayerVisibility, MapTheme } from './mapDesign'
 
@@ -248,7 +247,7 @@ function extendRoad(base:RoadLine,all:RoadLine[]):[number,number][] {
 }
 
 function roadJunctions(route:[number,number][],all:RoadLine[]):RoadJunction[] {
-  const lookup=new Map<string,{index:number;directions:number[]}[]>()
+  const lookup=new globalThis.Map<string,{index:number;directions:number[]}[]>()
   const key=(coord:[number,number])=>coord[0].toFixed(6)+','+coord[1].toFixed(6)
   for(let i=0;i<route.length;i++){
     const k=key(route[i])
