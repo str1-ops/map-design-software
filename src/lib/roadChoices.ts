@@ -371,67 +371,197 @@ const collection=(items:(RoadOverride|SelectedRoad)[])=>({
     geometry:{type:'LineString' as const,coordinates:item.coordinates}
   }))
 })
-export function visibleRoadAppearance(theme:MapTheme,category:RoadCategory,zoom:number){
-  const stops=category==='Highways'?[2.15,4,7.2]:
-    category==='Major Roads'?[1.8,3,5.1]:[1.5,2.3,3.8]
-  const t=zoom<=9?0:zoom<14?(zoom-9)/5:zoom<18?(zoom-14)/4:1
-  const width=zoom<14?stops[0]+(stops[1]-stops[0])*t:
-    stops[1]+(stops[2]-stops[1])*t
+// Roads manually selected at detail zoom should blend with the existing
+// overview map, rather than looking like a second, stroked overlay.
+type ScreenPoint={x:number;y:number}
+function evaluateWidth(value:any,properties:Record<string,unknown>,zoom:number):unknown {
+  if(!Array.isArray(value))return value
+  switch(value[0]){
+    case 'zoom':return zoom
+    case 'get':return properties[String(value[1])]
+    case 'literal':return value[1]
+    case '==':return evaluateWidth(value[1],properties,zoom)===evaluateWidth(value[2],properties,zoom)
+    case 'any':return value.slice(1).some((part:any)=>Boolean(evaluateWidth(part,properties,zoom)))
+    case 'all':return value.slice(1).every((part:any)=>Boolean(evaluateWidth(part,properties,zoom)))
+    case '*':{
+      const numbers=value.slice(1).map((part:any)=>Number(evaluateWidth(part,properties,zoom)))
+      return numbers.every(Number.isFinite)?numbers.reduce((a:number,b:number)=>a*b,1):undefined
+    }
+    case 'case':{
+      for(let i=1;i<value.length-1;i+=2)if(evaluateWidth(value[i],properties,zoom))return evaluateWidth(value[i+1],properties,zoom)
+      return evaluateWidth(value[value.length-1],properties,zoom)
+    }
+    case 'match':{
+      const tested=evaluateWidth(value[1],properties,zoom)
+      for(let i=2;i<value.length-1;i+=2){
+        if(value[i]===tested || Array.isArray(value[i])&&value[i].includes(tested))return evaluateWidth(value[i+1],properties,zoom)
+      }
+      return evaluateWidth(value[value.length-1],properties,zoom)
+    }
+    case 'interpolate':{
+      const input=Number(evaluateWidth(value[2],properties,zoom))
+      for(let i=3;i<value.length-2;i+=2){
+        const next=Number(value[i+2])
+        if(input<=next){
+          const from=Number(evaluateWidth(value[i+1],properties,zoom))
+          const to=Number(evaluateWidth(value[i+3],properties,zoom))
+          const t=Math.max(0,Math.min(1,(input-Number(value[i]))/(next-Number(value[i]))))
+          return from+(to-from)*t
+        }
+      }
+      return evaluateWidth(value[value.length-1],properties,zoom)
+    }
+    case 'step':{
+      const input=Number(evaluateWidth(value[1],properties,zoom))
+      let output=evaluateWidth(value[2],properties,zoom)
+      for(let i=3;i<value.length;i+=2){
+        if(input<Number(value[i]))break
+        output=evaluateWidth(value[i+1],properties,zoom)
+      }
+      return output
+    }
+  }
+  return undefined
+}
+const roadLineLayer=(feature:any)=>{
+  const layer=feature?.layer
+  return layer?.type==='line' &&
+    !String(layer.id||'').startsWith('strictons-') &&
+    (feature.sourceLayer||layer['source-layer'])==='transportation'
+}
+function nearbyRoads(map:Map,at:ScreenPoint,radius:number){
+  try{
+    return map.queryRenderedFeatures([
+      [at.x-radius,at.y-radius],[at.x+radius,at.y+radius]
+    ]).filter(roadLineLayer)
+  }catch{return []}
+}
+function classCompatible(cls:string,otherClass:string){
+  // Road subclasses should not turn a path into a motorway, or vice versa.
+  return cls===otherClass || categoryFor(cls)===categoryFor(otherClass)
+}
+function closestPointOnSegment(p:ScreenPoint,a:ScreenPoint,b:ScreenPoint):ScreenPoint{
+  const dx=b.x-a.x,dy=b.y-a.y,len=dx*dx+dy*dy
+  const t=len>0?Math.max(0,Math.min(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/len)):0
+  return {x:a.x+dx*t,y:a.y+dy*t}
+}
+export function projectIncludedRoad(map:Map,choice:Pick<RoadOverride,'coordinates'|'roadClass'>){
+  const points=choice.coordinates.map(c=>{
+    const p=map.project(c)
+    return {x:p.x,y:p.y}
+  })
+  if(points.length<2)return points
+  const result=points.map(p=>({...p}))
+  // Snap only ends that are already almost on a mapped road. The small
+  // screen tolerance corrects low-zoom simplification without bridging gaps
+  // between unrelated roads, bridges, beaches or parallel streets.
+  for(const index of [0,result.length-1]){
+    const origin=points[index]
+    let nearest:ScreenPoint|undefined
+    let best=2.9 // CSS pixels, max
+    for(const feature of nearbyRoads(map,origin,7)){
+      const cls=String(feature.properties?.class||feature.properties?.subclass||'').toLowerCase()
+      if(!classCompatible(choice.roadClass,cls))continue
+      const roadName=String(feature.properties?.name||'')
+      // Location proximity is necessary; a matching name alone is not enough.
+      for(const line of featureLines(feature)){
+        for(let i=1;i<line.length;i++){
+          const a=point(map,line[i-1]),b=point(map,line[i])
+          const candidate=closestPointOnSegment(origin,a,b)
+          const dist=Math.hypot(origin.x-candidate.x,origin.y-candidate.y)
+          if(roadName && dist===0){nearest=origin;best=0;break}
+          if(dist<best){best=dist;nearest=candidate}
+        }
+      }
+      if(best===0)break
+    }
+    if(nearest)result[index]=nearest
+  }
+  return result
+}
+export function includedRoadCoordinates(map:Map,choice:Pick<RoadOverride,'coordinates'|'roadClass'>):[number,number][] {
+  return projectIncludedRoad(map,choice).map(p=>{
+    const ll=map.unproject([p.x,p.y])
+    return [ll.lng,ll.lat]
+  })
+}
+export function visibleRoadAppearance(
+  theme:MapTheme,category:RoadCategory,zoom:number,map?:Map,roadClass?:string,coordinates?:[number,number][]
+){
+  const colour=category==='Highways'?theme.highways:category==='Major Roads'?theme.roads:theme.minorRoads
   const scale=category==='Highways'?theme.highwayWidthScale:
     category==='Major Roads'?theme.roadWidthScale:theme.minorRoadWidthScale
-  const colour=category==='Highways'?theme.highways:
-    category==='Major Roads'?theme.roads:theme.minorRoads
-  const thickness=Math.max(1.35,width*Math.max(0.25,scale))
-  return {colour,casing:theme.boundaries,width:thickness,casingWidth:thickness+1.25}
+  const base=category==='Highways'?2.2:category==='Major Roads'?1.45:0.9
+  const minWidth=category==='Highways'?1.3:category==='Major Roads'?0.85:0.55
+  const fallback=Math.max(minWidth,base*scale*(0.9+Math.max(0,zoom-10)*0.12))
+  let width=fallback
+  if(map&&coordinates?.length){
+    // Match nearby native transportation line-width rather than introducing
+    // our own much heavier road or unrelated dark casing.
+    const sample=coordinates[Math.floor(coordinates.length/2)]
+    const samplePoint=point(map,sample)
+    const adjacent=nearbyRoads(map,samplePoint,130)
+      .filter(feature=>{
+        const cls=String(feature.properties?.class||feature.properties?.subclass||'').toLowerCase()
+        return cls && classCompatible(roadClass||'',cls)
+      })
+    const matches:number[]=[]
+    for(const feature of adjacent){
+      try{
+        const paint=map.getPaintProperty(feature.layer.id,'line-width')
+        const featureClass=roadClass||String(feature.properties?.class||'')
+        const expressionValue=Number(evaluateWidth(paint,{...feature.properties,class:featureClass},zoom))
+        if(Number.isFinite(expressionValue)&&expressionValue>.15&&expressionValue<30)matches.push(expressionValue)
+      }catch{/* styled tiles can be changing */}
+    }
+    if(matches.length){
+      matches.sort((a,b)=>a-b)
+      // Road styling can include multiple "casing" and "fill" layers. Using
+      // the *narrower* stroke here avoids creating a new thick route.
+      const native=matches[Math.floor((matches.length-1)*0.3)]
+      width=Math.max(minWidth,Math.min(native,Math.max(fallback*1.8,2.5)))
+    }
+  }
+  return {colour,width}
 }
 function themeColour(theme:MapTheme){
-  return ['match',['get','category'],'Highways',theme.highways,'Major Roads',theme.roads,
-    'Minor Roads',theme.minorRoads,theme.roads] as any
+  return ['match',['get','category'],'Highways',theme.highways,
+    'Major Roads',theme.roads,'Minor Roads',theme.minorRoads,theme.roads] as any
 }
-function themeWidth(theme:MapTheme,extra=0){
-  const h=theme.highwayWidthScale,m=theme.roadWidthScale,s=theme.minorRoadWidthScale
-  const tier=(high:number,major:number,minor:number):any=>['match',['get','category'],
-    'Highways',Math.max(1.35,high*h)+extra,
-    'Major Roads',Math.max(1.35,major*m)+extra,
-    'Minor Roads',Math.max(1.35,minor*s)+extra,1.35+extra]
+function themeWidth(theme:MapTheme){
+  const hi=Math.max(0.25,theme.highwayWidthScale)
+  const major=Math.max(0.25,theme.roadWidthScale)
+  const minor=Math.max(0.25,theme.minorRoadWidthScale)
   return ['interpolate',['linear'],['zoom'],
-    9,tier(2.15,1.8,1.5),14,tier(4,3,2.3),18,tier(7.2,5.1,3.8)
+    9,['match',['get','category'],'Highways',1.8*hi,'Major Roads',1.2*major,'Minor Roads',0.65*minor,1],
+    14,['match',['get','category'],'Highways',3.8*hi,'Major Roads',2.3*major,'Minor Roads',1.3*minor,1],
+    18,['match',['get','category'],'Highways',6.5*hi,'Major Roads',4.2*major,'Minor Roads',2.2*minor,1]
   ] as any
 }
 export function ensureRoadChoiceLayers(
-  map:Map, choices:RoadOverride[], _selected:SelectedRoad|null,theme:MapTheme,visibility:LayerVisibility
+  map:Map,choices:RoadOverride[],_selected:SelectedRoad|null,theme:MapTheme,visibility:LayerVisibility
 ) {
   if(!map.isStyleLoaded())return
+  // Permanent inclusions are drawn once by RoadVisibilityOverlay on the
+  // canvas, and composited into PNG / emitted as vectors for SVG export.
+  // MapLibre only masks explicitly hidden roads, so strokes never double up.
+  const oldLayerIds=[SHOW,SHOW_CASING]
+  for(const id of oldLayerIds){
+    if(map.getLayer(id))map.removeLayer(id)
+  }
   const source=map.getSource(SOURCE) as any
   if(source)source.setData(collection(choices))
   else map.addSource(SOURCE,{type:'geojson',data:collection(choices)} as any)
-  // Above land detail and roads, below labels. OSM geometry remains unchanged.
-  const firstLabel=(map.getStyle().layers as any[]).find((layer)=>layer.type==='symbol'&&!String(layer.id).startsWith('strictons-'))?.id
-  const add=(id:string,sourceId:string,filter:any,paint:any,top=false)=>{
-    if(!map.getLayer(id)){
-      map.addLayer({
-        id,type:'line',source:sourceId,filter,
-        layout:{'line-cap':'round','line-join':'round'},
-        paint
-      } as any,top?undefined:firstLabel)
-    }
+  const firstLabel=(map.getStyle().layers as any[]).find(layer=>layer.type==='symbol'&&!String(layer.id).startsWith('strictons-'))?.id
+  if(!map.getLayer(HIDE)){
+    map.addLayer({
+      id:HIDE,type:'line',source:SOURCE,
+      filter:['==',['get','mode'],'hide'],
+      layout:{'line-cap':'round','line-join':'round'},
+      paint:{'line-color':theme.land,'line-width':themeWidth(theme)}
+    } as any,firstLabel)
   }
-  add(HIDE,SOURCE,['==',['get','mode'],'hide'],
-    {'line-color':theme.land,'line-width':themeWidth(theme,1.15)})
-  add(SHOW_CASING,SOURCE,['==',['get','mode'],'show'],
-    {'line-color':theme.boundaries,'line-width':themeWidth(theme,1.25)})
-  add(SHOW,SOURCE,['==',['get','mode'],'show'],
-    {'line-color':themeColour(theme),'line-width':themeWidth(theme)})
-  const set=(id:string,property:string,value:unknown)=>{
-    try{(map as any).setPaintProperty(id,property,value)}catch{/* external style can reload */}
-  }
-  set(HIDE,'line-color',theme.land)
-  set(HIDE,'line-width',themeWidth(theme,1.15))
-  set(SHOW_CASING,'line-color',theme.boundaries)
-  set(SHOW_CASING,'line-width',themeWidth(theme,1.25))
-  set(SHOW,'line-color',themeColour(theme))
-  set(SHOW,'line-width',themeWidth(theme))
-  for(const id of [HIDE,SHOW_CASING,SHOW]) {
-    try{(map as any).setLayoutProperty(id,'visibility',visibility.roads?'visible':'none')}catch{/* no-op */}
-  }
+  map.setPaintProperty(HIDE,'line-color',theme.land)
+  map.setPaintProperty(HIDE,'line-width',themeWidth(theme))
+  map.setLayoutProperty(HIDE,'visibility',visibility.roads?'visible':'none')
 }
