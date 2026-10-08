@@ -528,14 +528,16 @@ function themeColour(theme:MapTheme){
   return ['match',['get','category'],'Highways',theme.highways,
     'Major Roads',theme.roads,'Minor Roads',theme.minorRoads,theme.roads] as any
 }
-function themeWidth(theme:MapTheme){
+function themeWidth(theme:MapTheme,extra=0){
   const hi=Math.max(0.25,theme.highwayWidthScale)
   const major=Math.max(0.25,theme.roadWidthScale)
   const minor=Math.max(0.25,theme.minorRoadWidthScale)
+  const tiers=(high:number,road:number,minorRoad:number):any=>['match',['get','category'],
+    'Highways',high*hi+extra,'Major Roads',road*major+extra,'Minor Roads',minorRoad*minor+extra,1+extra]
   return ['interpolate',['linear'],['zoom'],
-    9,['match',['get','category'],'Highways',1.8*hi,'Major Roads',1.2*major,'Minor Roads',0.65*minor,1],
-    14,['match',['get','category'],'Highways',3.8*hi,'Major Roads',2.3*major,'Minor Roads',1.3*minor,1],
-    18,['match',['get','category'],'Highways',6.5*hi,'Major Roads',4.2*major,'Minor Roads',2.2*minor,1]
+    9,tiers(1.8,1.2,0.65),
+    14,tiers(3.8,2.3,1.3),
+    18,tiers(6.5,4.2,2.2)
   ] as any
 }
 export function ensureRoadChoiceLayers(
@@ -558,10 +560,10 @@ export function ensureRoadChoiceLayers(
       id:HIDE,type:'line',source:SOURCE,
       filter:['==',['get','mode'],'hide'],
       layout:{'line-cap':'round','line-join':'round'},
-      paint:{'line-color':theme.land,'line-width':themeWidth(theme)}
+      paint:{'line-color':theme.land,'line-width':themeWidth(theme,1.15)}
     } as any,firstLabel)
   }
   map.setPaintProperty(HIDE,'line-color',theme.land)
-  map.setPaintProperty(HIDE,'line-width',themeWidth(theme))
+  map.setPaintProperty(HIDE,'line-width',themeWidth(theme,1.15))
   map.setLayoutProperty(HIDE,'visibility',visibility.roads?'visible':'none')
 }
