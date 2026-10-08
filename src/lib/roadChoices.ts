@@ -625,16 +625,17 @@ export function ensureRoadChoiceLayers(
   const source=map.getSource(SOURCE) as any
   if(source)source.setData(collection(choices))
   else map.addSource(SOURCE,{type:'geojson',data:collection(choices)} as any)
-  const firstLabel=(map.getStyle().layers as any[]).find(layer=>layer.type==='symbol'&&!String(layer.id).startsWith('strictons-'))?.id
   if(!map.getLayer(HIDE)){
     map.addLayer({
       id:HIDE,type:'line',source:SOURCE,
       filter:['==',['get','mode'],'hide'],
-      layout:{'line-cap':'round','line-join':'round'},
-      paint:{'line-color':theme.land,'line-width':themeWidth(theme,1.15)}
-    } as any,firstLabel)
+      layout:{'line-cap':'butt','line-join':'round'},
+      paint:{'line-color':theme.land,'line-width':themeWidth(theme)}
+    } as any)
   }
   map.setPaintProperty(HIDE,'line-color',theme.land)
-  map.setPaintProperty(HIDE,'line-width',themeWidth(theme,1.15))
+  map.setPaintProperty(HIDE,'line-width',themeWidth(theme))
+  map.setLayoutProperty(HIDE,'line-cap','butt')
   map.setLayoutProperty(HIDE,'visibility',visibility.roads?'visible':'none')
+  map.moveLayer(HIDE)
 }
