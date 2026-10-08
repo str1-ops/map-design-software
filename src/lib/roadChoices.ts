@@ -505,6 +505,49 @@ export function projectIncludedRoad(map:Map,choice:Pick<RoadOverride,'coordinate
   }
   return result
 }
+export function visibleIncludedRoadParts(map:Map,choice:RoadOverride,choices:RoadOverride[]):ScreenPoint[][] {
+  if(choice.mode!=='show')return []
+  const source=projectIncludedRoad(map,choice)
+  if(source.length<2)return []
+  const hides=choices.filter(hide=>hide.mode==='hide'&&hide.coordinates.length>1&&
+    classCompatible(hide.roadClass,choice.roadClass))
+  if(!hides.length)return [source]
+  const hidePaths=hides.map(hide=>hide.coordinates.map(coordinate=>point(map,coordinate)))
+  const hidden=(p:ScreenPoint,dx:number,dy:number)=>{
+    const length=Math.hypot(dx,dy)
+    if(length<.05)return false
+    for(const path of hidePaths){
+      for(let i=1;i<path.length;i++){
+        const a=path[i-1],b=path[i],vx=b.x-a.x,vy=b.y-a.y
+        const roadLength=Math.hypot(vx,vy)
+        if(roadLength<.05)continue
+        if(Math.abs(dx*vx+dy*vy)/(roadLength*length)<.88)continue
+        const near=closestPointOnSegment(p,a,b)
+        if(Math.hypot(p.x-near.x,p.y-near.y)<2.4)return true
+      }
+    }
+    return false
+  }
+  const parts:ScreenPoint[][]=[]
+  let active:ScreenPoint[]=[]
+  const flush=()=>{if(active.length>1)parts.push(active);active=[]}
+  for(let i=1;i<source.length;i++){
+    const a=source[i-1],b=source[i]
+    const dx=b.x-a.x,dy=b.y-a.y
+    const steps=Math.max(1,Math.min(500,Math.ceil(Math.hypot(dx,dy)/1.5)))
+    for(let j=0;j<steps;j++){
+      const t=j/steps,u=(j+1)/steps
+      const start={x:a.x+dx*t,y:a.y+dy*t}
+      const end={x:a.x+dx*u,y:a.y+dy*u}
+      const midpoint={x:(start.x+end.x)/2,y:(start.y+end.y)/2}
+      if(hidden(midpoint,dx,dy)){flush();continue}
+      if(!active.length)active=[start,end]
+      else active.push(end)
+    }
+  }
+  flush()
+  return parts
+}
 export function includedRoadCoordinates(map:Map,choice:Pick<RoadOverride,'coordinates'|'roadClass'>):[number,number][] {
   return projectIncludedRoad(map,choice).map(p=>{
     const ll=map.unproject([p.x,p.y])
