@@ -991,8 +991,8 @@ type RoadNameCandidate = {
   roadClass: string
 }
 
-function geometryScreenLines(map: Map, geometry: any) {
-  const projectLine = (coordinates:any[]) => coordinates.map((coordinate) => {
+function geometryScreenLines(map: Map, geometry: any): SvgPoint[][] {
+  const projectLine = (coordinates:any[]):SvgPoint[] => coordinates.map((coordinate):SvgPoint => {
     const point = map.project([Number(coordinate[0]), Number(coordinate[1])])
     return { x:point.x, y:point.y }
   })
