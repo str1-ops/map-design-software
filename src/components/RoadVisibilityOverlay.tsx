@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { Map } from 'maplibre-gl'
-import { visibleRoadAppearance, type RoadOverride } from '../lib/roadChoices'
+import { visibleRoadAppearance, projectIncludedRoad, type RoadOverride } from '../lib/roadChoices'
 import type { LayerVisibility, MapTheme } from '../lib/mapDesign'
 
 type Props={
@@ -45,11 +45,11 @@ export default function RoadVisibilityOverlay({map,choices,theme,visibility}:Pro
     return choices.filter(choice=>
       choice.mode==='show'&&choice.coordinates?.length>1
     ).map(choice=>{
-      const points=choice.coordinates.map(coord=>map.project(coord))
+      const points=projectIncludedRoad(map,choice)
       const path=points.map((p,i)=>
         `${i===0?'M':'L'}${p.x.toFixed(2)},${p.y.toFixed(2)}`
       ).join(' ')
-      return {id:choice.id,path,style:visibleRoadAppearance(theme,choice.category,zoom)}
+      return {id:choice.id,path,style:visibleRoadAppearance(theme,choice.category,zoom,map,choice.roadClass,choice.coordinates)}
     })
   },[map,choices,theme,visibility.roads,viewport.revision])
 
@@ -58,11 +58,8 @@ export default function RoadVisibilityOverlay({map,choices,theme,visibility}:Pro
     width={viewport.width} height={viewport.height}
     viewBox={`0 0 ${viewport.width} ${viewport.height}`}
     aria-hidden="true">
-    {drawn.map(road=><g key={road.id}>
-      <path d={road.path} fill="none" stroke={road.style.casing}
-        strokeWidth={road.style.casingWidth} strokeLinecap="round" strokeLinejoin="round"/>
-      <path d={road.path} fill="none" stroke={road.style.colour}
-        strokeWidth={road.style.width} strokeLinecap="round" strokeLinejoin="round"/>
-    </g>)}
+    {drawn.map(road=><path key={road.id} d={road.path}
+      fill="none" stroke={road.style.colour}
+      strokeWidth={road.style.width} strokeLinecap="round" strokeLinejoin="round"/>)}
   </svg>
 }
