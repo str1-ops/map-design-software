@@ -947,20 +947,26 @@ function titleCaseRoadClass(value: unknown) {
   return text.replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
-function roadIdentity(properties: Record<string, any>, feature: any, layerId: string) {
+function roadIdentity(properties: Record<string, any>, feature: any, layerId: string, namedProperties?: Record<string, any>) {
   const name = String(
+    namedProperties?.name ||
+    namedProperties?.['name:en'] ||
+    namedProperties?.['name:latin'] ||
     properties?.name ||
     properties?.['name:en'] ||
     properties?.['name:latin'] ||
     ''
   ).trim()
   const ref = String(
+    namedProperties?.ref ||
+    namedProperties?.route_ref ||
+    namedProperties?.['ref:road'] ||
     properties?.ref ||
     properties?.route_ref ||
     properties?.['ref:road'] ||
     ''
   ).trim()
-  const roadClass = String(properties?.class || properties?.subclass || 'road').trim()
+  const roadClass = String(properties?.class || properties?.subclass || namedProperties?.class || 'road').trim()
 
   let label = ''
   if (name && ref && !name.toLowerCase().includes(ref.toLowerCase())) label = `${name} (${ref})`
@@ -976,6 +982,137 @@ function roadIdentity(properties: Record<string, any>, feature: any, layerId: st
     : `unnamed|${roadClass.toLowerCase()}|${fallbackId}`
 
   return { label, key, roadClass }
+}
+
+type RoadNameCandidate = {
+  source: string
+  properties: Record<string, any>
+  lines: SvgPoint[][]
+  roadClass: string
+}
+
+function geometryScreenLines(map: Map, geometry: any) {
+  const projectLine = (coordinates:any[]) => coordinates.map((coordinate) => {
+    const point = map.project([Number(coordinate[0]), Number(coordinate[1])])
+    return { x:point.x, y:point.y }
+  })
+  if (!geometry) return [] as SvgPoint[][]
+  if (geometry.type === 'LineString') return [projectLine(geometry.coordinates)]
+  if (geometry.type === 'MultiLineString') return geometry.coordinates.map((line:any[]) => projectLine(line))
+  return [] as SvgPoint[][]
+}
+
+function roadSamplePoints(map: Map, geometry: any) {
+  const lines = geometryScreenLines(map, geometry)
+  const points:SvgPoint[] = []
+  for (const line of lines) {
+    if (!line.length) continue
+    points.push(line[0])
+    points.push(line[Math.floor((line.length - 1) / 2)])
+    points.push(line[line.length - 1])
+    if (line.length > 4) {
+      points.push(line[Math.floor((line.length - 1) * 0.25)])
+      points.push(line[Math.floor((line.length - 1) * 0.75)])
+    }
+  }
+  return points.filter((point, index, all) =>
+    all.findIndex((candidate) => Math.abs(candidate.x-point.x)<0.01 && Math.abs(candidate.y-point.y)<0.01) === index
+  )
+}
+
+function pointToSegmentDistance(point: SvgPoint, a: SvgPoint, b: SvgPoint) {
+  const dx=b.x-a.x, dy=b.y-a.y
+  const lengthSq=dx*dx+dy*dy
+  if (!lengthSq) return Math.hypot(point.x-a.x,point.y-a.y)
+  const t=Math.max(0,Math.min(1,((point.x-a.x)*dx+(point.y-a.y)*dy)/lengthSq))
+  return Math.hypot(point.x-(a.x+t*dx),point.y-(a.y+t*dy))
+}
+
+function pointToLinesDistance(point: SvgPoint, lines: SvgPoint[][]) {
+  let best=Infinity
+  for (const line of lines) {
+    for (let i=0;i<line.length-1;i++) {
+      best=Math.min(best,pointToSegmentDistance(point,line[i],line[i+1]))
+      if (best<0.35) return best
+    }
+  }
+  return best
+}
+
+function roadClassFamily(value: unknown) {
+  const roadClass=String(value || '').toLowerCase()
+  if (['motorway','trunk','motorway_construction','trunk_construction'].includes(roadClass)) return 'highway'
+  if (['primary','secondary','tertiary','primary_construction','secondary_construction','tertiary_construction','link'].includes(roadClass)) return 'major'
+  return roadClass ? 'minor' : ''
+}
+
+function collectRoadNameCandidates(map: Map, features: any[]) {
+  const sources = new Set<string>()
+  for (const feature of features) {
+    const sourceLayer=String(feature.sourceLayer || feature.layer?.['source-layer'] || '').toLowerCase()
+    if (sourceLayer === 'transportation' && feature.source) sources.add(String(feature.source))
+  }
+
+  const candidates:RoadNameCandidate[]=[]
+  const seen=new Set<string>()
+  for (const source of sources) {
+    let namedFeatures:any[]=[]
+    try {
+      namedFeatures=(map as any).querySourceFeatures(source,{sourceLayer:'transportation_name'}) || []
+    } catch {
+      continue
+    }
+
+    for (const feature of namedFeatures) {
+      const properties=feature.properties || {}
+      const name=properties.name || properties['name:en'] || properties['name:latin']
+      const ref=properties.ref || properties.route_ref || properties['ref:road']
+      if (!name && !ref) continue
+      const lines=geometryScreenLines(map,feature.geometry)
+      if (!lines.some((line)=>line.length>1)) continue
+      const signature=`${source}|${name || ''}|${ref || ''}|${properties.class || ''}|${JSON.stringify(feature.geometry)}`
+      if (seen.has(signature)) continue
+      seen.add(signature)
+      candidates.push({
+        source,
+        properties,
+        lines,
+        roadClass:String(properties.class || properties.subclass || ''),
+      })
+    }
+  }
+  return candidates
+}
+
+function matchRoadName(map: Map, feature: any, candidates: RoadNameCandidate[]) {
+  const source=String(feature.source || '')
+  const samples=roadSamplePoints(map,feature.geometry)
+  if (!source || !samples.length) return undefined
+
+  const currentClass=String(feature.properties?.class || feature.properties?.subclass || '')
+  const currentFamily=roadClassFamily(currentClass)
+  let best:{ candidate:RoadNameCandidate; score:number; maxDistance:number }|undefined
+
+  for (const candidate of candidates) {
+    if (candidate.source !== source) continue
+    const distances=samples.map((point)=>pointToLinesDistance(point,candidate.lines)).filter(Number.isFinite)
+    if (!distances.length) continue
+    distances.sort((a,b)=>a-b)
+    const considered=distances.slice(0,Math.min(3,distances.length))
+    const average=considered.reduce((sum,value)=>sum+value,0)/considered.length
+    const maxDistance=Math.max(...considered)
+    const candidateFamily=roadClassFamily(candidate.roadClass)
+    const classPenalty=currentFamily && candidateFamily && currentFamily!==candidateFamily ? 9 : 0
+    const exactClassBonus=currentClass && candidate.roadClass && currentClass===candidate.roadClass ? -2 : 0
+    const score=average+classPenalty+exactClassBonus
+
+    if (!best || score<best.score) best={candidate,score,maxDistance}
+  }
+
+  if (!best) return undefined
+  // Tight enough to avoid borrowing names from nearby parallel or crossing roads.
+  if (best.maxDistance>14 || best.score>18) return undefined
+  return best.candidate.properties
 }
 
 function featureCategory(feature: any) {
@@ -1055,6 +1192,7 @@ export async function exportMapSvg(args: ExportSvgArgs) {
   const widthMm = args.size.widthMm + args.size.bleedMm * 2
   const heightMm = args.size.heightMm + args.size.bleedMm * 2
   const features = [...map.queryRenderedFeatures()].reverse() as any[]
+  const roadNameCandidates = collectRoadNameCandidates(map, features)
 
   const groupNames = [
     'Land Details',
@@ -1169,7 +1307,8 @@ export async function exportMapSvg(args: ExportSvgArgs) {
         )
       }
     } else if (roadCategories.has(category)) {
-      const identity = roadIdentity(properties, feature, layerId)
+      const namedProperties = matchRoadName(map, feature, roadNameCandidates)
+      const identity = roadIdentity(properties, feature, layerId, namedProperties)
       const categoryRoads = namedRoadGroups.get(category)!
       let road = categoryRoads.get(identity.key)
       if (!road) {
