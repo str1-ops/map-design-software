@@ -1097,9 +1097,8 @@ export async function exportMapSvg(args: ExportSvgArgs) {
   }).join('')
 
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${width} ${height}" shape-rendering="geometricPrecision">
-  <defs><clipPath id="canvas-clip"><rect x="0" y="0" width="${width}" height="${height}"/></clipPath></defs>
-  <g id="map-artwork" data-name="Map Artwork" clip-path="url(#canvas-clip)">
+<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${width} ${height}" shape-rendering="geometricPrecision" overflow="visible">
+  <g id="map-artwork" data-name="Map Artwork">
     <rect id="land-background" x="0" y="0" width="${width}" height="${height}" fill="${escapeXml(args.theme.land)}"/>
     ${orderedGroups}
   </g>
