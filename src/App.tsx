@@ -9,10 +9,11 @@ import {
   type MapTheme, type PrintSize,
 } from './lib/mapDesign'
 import { ensureRoadRepairLayers, findRoadRepairs, type RoadSelection, type RoadRepair } from './lib/roadRepairs'
+import { ensureRoadChoiceLayers, selectRoadAt, type RoadOverride, type SelectedRoad } from './lib/roadChoices'
 
 maplibregl.setWorkerUrl(workerUrl)
 
-type Project = { name:string; size:PrintSize; theme:MapTheme; visible:LayerVisibility; places:FeaturedPlace[]; repairs:RoadRepair[]; camera:CameraState }
+type Project = { name:string; size:PrintSize; theme:MapTheme; visible:LayerVisibility; places:FeaturedPlace[]; repairs:RoadRepair[]; roadChoices:RoadOverride[]; camera:CameraState }
 type SearchResult = { place_id:number; display_name:string; lat:string; lon:string; type?:string }
 
 const DEFAULTS: Project = {
@@ -20,7 +21,7 @@ const DEFAULTS: Project = {
   size:{ widthMm:203, heightMm:185, bleedMm:3, dpi:300 },
   theme:DEFAULT_THEME,
   visible:{ roads:true, minorRoads:true, railways:true, buildings:true, parks:true, boundaries:false, labels:true, placeLabels:true, roadLabels:true, poiLabels:false, waterLabels:true },
-  places:[], repairs:[], camera:{ center:[151.544,-33.263], zoom:11.2, bearing:0, pitch:0 },
+  places:[], repairs:[], roadChoices:[], camera:{ center:[151.544,-33.263], zoom:11.2, bearing:0, pitch:0 },
 }
 const PRESETS = [
   ['Beachcomber spread',203,185],['Beachcomber page',101.5,185],['A4 landscape',297,210],['A4 portrait',210,297],
@@ -29,7 +30,7 @@ const STORE='strictons-map-studio-v1'
 let lastSearch=0
 
 function load():Project {
-  try { const p=JSON.parse(localStorage.getItem(STORE)||'null'); return p ? {...DEFAULTS,...p,size:{...DEFAULTS.size,...p.size},theme:{...DEFAULT_THEME,...p.theme},visible:{...DEFAULTS.visible,...p.visible},repairs:Array.isArray(p.repairs)?p.repairs:[],camera:{...DEFAULTS.camera,...p.camera}} : DEFAULTS } catch { return DEFAULTS }
+  try { const p=JSON.parse(localStorage.getItem(STORE)||'null'); return p ? {...DEFAULTS,...p,size:{...DEFAULTS.size,...p.size},theme:{...DEFAULT_THEME,...p.theme},visible:{...DEFAULTS.visible,...p.visible},repairs:Array.isArray(p.repairs)?p.repairs:[],roadChoices:Array.isArray(p.roadChoices)?p.roadChoices:[],camera:{...DEFAULTS.camera,...p.camera}} : DEFAULTS } catch { return DEFAULTS }
 }
 function fileName(s:string){ return s.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || 'map' }
 
@@ -40,16 +41,18 @@ function Colour({label,value,onChange}:{label:string;value:string;onChange:(v:st
   return <label className="colour"><span>{label}</span><div><input type="color" value={value} onChange={e=>onChange(e.target.value)}/><code>{value.toUpperCase()}</code></div></label>
 }
 
-function MapView({project,pick,locked,selecting,selection,onCamera,onPick,onViewport,onMapReady,onSelection}:{
+function MapView({project,pick,locked,selecting,selection,roadPicking,selectedRoad,onCamera,onPick,onViewport,onMapReady,onSelection,onRoadClick}:{
   project:Project;pick:boolean;locked:boolean;selecting:boolean;selection:RoadSelection|null;
+  roadPicking:boolean;selectedRoad:SelectedRoad|null;
   onCamera:(c:CameraState)=>void;onPick:(p:FeaturedPlace)=>void;
   onViewport:(v:{width:number;height:number})=>void;
   onMapReady:(map:MapLibreMap|null)=>void;
   onSelection:(area:RoadSelection|null)=>void
+  onRoadClick:(candidate:SelectedRoad|null)=>void
 }){
   const host=useRef<HTMLDivElement>(null),mapRef=useRef<MapLibreMap|null>(null)
-  const latest=useRef({onCamera,onPick,onViewport,onMapReady,onSelection})
-  latest.current={onCamera,onPick,onViewport,onMapReady,onSelection}
+  const latest=useRef({onCamera,onPick,onViewport,onMapReady,onSelection,onRoadClick})
+  latest.current={onCamera,onPick,onViewport,onMapReady,onSelection,onRoadClick}
   const pointerStart=useRef<{x:number;y:number}|null>(null)
   const [drag,setDrag]=useState<{left:number;top:number;width:number;height:number}|null>(null)
 
@@ -72,6 +75,7 @@ function MapView({project,pick,locked,selecting,selection,onCamera,onPick,onView
       syncViewport()
       applyMapDesign(map,project.theme,project.visible)
       ensureRoadRepairLayers(map,project.repairs,project.theme,project.visible)
+      ensureRoadChoiceLayers(map,project.roadChoices,selectedRoad,project.theme,project.visible)
       ensureFeaturedLayers(map,project.places,project.theme)
     })
     map.on('moveend',()=>{
@@ -79,6 +83,10 @@ function MapView({project,pick,locked,selecting,selection,onCamera,onPick,onView
       latest.current.onCamera({center:[c.lng,c.lat],zoom:map.getZoom(),bearing:map.getBearing(),pitch:map.getPitch()})
     })
     map.on('click',e=>{
+      if(map.getCanvas().dataset.roadPick==='1'){
+        latest.current.onRoadClick(selectRoadAt(map,e.point))
+        return
+      }
       if(map.getCanvas().dataset.pick!=='1')return
       latest.current.onPick({
         id:crypto.randomUUID(),name:guessFeatureName(map,e),
@@ -97,17 +105,19 @@ function MapView({project,pick,locked,selecting,selection,onCamera,onPick,onView
     const m=mapRef.current
     if(m){
       m.getCanvas().dataset.pick=pick?'1':''
-      m.getCanvas().style.cursor=pick?'crosshair':''
+      m.getCanvas().dataset.roadPick=roadPicking?'1':''
+      m.getCanvas().style.cursor=pick||roadPicking?'crosshair':''
     }
-  },[pick])
+  },[pick,roadPicking])
   useEffect(()=>{
     const m=mapRef.current
     if(m?.isStyleLoaded()){
       applyMapDesign(m,project.theme,project.visible)
       ensureRoadRepairLayers(m,project.repairs,project.theme,project.visible)
+      ensureRoadChoiceLayers(m,project.roadChoices,selectedRoad,project.theme,project.visible)
       ensureFeaturedLayers(m,project.places,project.theme)
     }
-  },[project.theme,project.visible,project.places,project.repairs])
+  },[project.theme,project.visible,project.places,project.repairs,project.roadChoices,selectedRoad])
   useEffect(()=>{
     const m=mapRef.current
     if(m)requestAnimationFrame(()=>m.resize())
@@ -195,6 +205,7 @@ function MapView({project,pick,locked,selecting,selection,onCamera,onPick,onView
     <div className="canvas-meta">{project.size.widthMm} × {project.size.heightMm} mm{locked?' · Saved canvas locked':''}</div>
     {pick&&<div className="pick-chip">Click a place on the map</div>}
     {selecting&&<div className="pick-chip">Drag a rectangle around the incomplete roads</div>}
+    {roadPicking&&!selecting&&<div className="pick-chip">Click one road section, then confirm Show or Hide</div>}
   </>
 }
 
@@ -212,6 +223,8 @@ export default function App(){
   const [selecting,setSelecting]=useState(false)
   const [selection,setSelection]=useState<RoadSelection|null>(null)
   const [checking,setChecking]=useState(false)
+  const [roadPicking,setRoadPicking]=useState(false)
+  const [selectedRoad,setSelectedRoad]=useState<SelectedRoad|null>(null)
   const [lastRepairIds,setLastRepairIds]=useState<string[]>([])
   const [repairStatus,setRepairStatus]=useState('')
   const [project,setProject]=useState<Project>(()=>load()), [tab,setTab]=useState<'document'|'style'|'places'>('document'), [pick,setPick]=useState(false)
@@ -226,13 +239,31 @@ export default function App(){
   const search=async(e:FormEvent)=>{e.preventDefault();if(!query.trim())return;setBusy(true);try{const r=await geocode(query.trim());setResults(r);if(!r.length)setNote('No places found')}catch(err){setNote(err instanceof Error?err.message:'Search failed')}finally{setBusy(false)}}
   const go=(r:SearchResult)=>{if(locked){setNote('Return to canvas before changing location.');return}patch('camera',{...project.camera,center:[Number(r.lon),Number(r.lat)],zoom:r.type==='city'||r.type==='town'?12:14});setResults([])}
   const add=(p:FeaturedPlace)=>{patch('places',[...project.places,p]);setPick(false);setTab('places')}
-  const lockCanvas=()=>{setLocked(true);setPick(false);setSelection(null);setSelecting(false);setRepairStatus('Saved print view locked. Pan and zoom in to inspect roads.')}
+  const lockCanvas=()=>{setLocked(true);setPick(false);setSelection(null);setSelecting(false);setSelectedRoad(null);setRoadPicking(false);setRepairStatus('Saved print view locked. Pan and zoom in to inspect roads.')}
   const returnToCanvas=()=>{
-    setSelecting(false);setSelection(null);setLocked(false)
+    setSelecting(false);setSelection(null);setSelectedRoad(null);setRoadPicking(false);setLocked(false)
     const map=liveMapRef.current
     if(map)map.jumpTo({center:project.camera.center,zoom:project.camera.zoom,bearing:project.camera.bearing,pitch:project.camera.pitch})
     setRepairStatus('Returned to the saved print view.')
   }
+  const chooseRoad=(choice:'show'|'hide')=>{
+    if(!selectedRoad)return
+    const coords=selectedRoad.coordinates
+    const forward=coords.map((p)=>p.map((v)=>v.toFixed(7)).join(',')).join(';')
+    const reverse=[...coords].reverse().map((p)=>p.map((v)=>v.toFixed(7)).join(',')).join(';')
+    const canonical=forward<reverse?forward:reverse
+    setProject(p=>{
+      const cleaned=p.roadChoices.filter(item=>{
+        const f=item.coordinates.map(point=>point.map(v=>v.toFixed(7)).join(',')).join(';')
+        const back=[...item.coordinates].reverse().map(point=>point.map(v=>v.toFixed(7)).join(',')).join(';')
+        return (f<back?f:back)!==canonical
+      })
+      return {...p,roadChoices:[...cleaned,{...selectedRoad,id:crypto.randomUUID(),mode:choice}]}
+    })
+    setRepairStatus((choice==='show'?'Always show':'Hide')+' applied to '+selectedRoad.name+'. Select another section or return to canvas.')
+    setSelectedRoad(null)
+  }
+  const removeRoadChoice=(id:string)=>setProject(p=>({...p,roadChoices:p.roadChoices.filter(choice=>choice.id!==id)}))
   const checkRepair=async()=>{
     const map=liveMapRef.current
     if(!locked||!selection||!map)return
@@ -261,8 +292,8 @@ export default function App(){
     setLastRepairIds([])
     setRepairStatus('Last repair batch undone.')
   }
-  const exportPng=async()=>{setBusy(true);try{await exportMapPng({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.png`,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places,repairs:project.repairs});setNote('Print PNG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
-  const exportSvg=async()=>{setBusy(true);try{const map=liveMapRef.current;if(!map)throw new Error('The live map is not ready yet.');await exportMapSvg({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.svg`,map,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places,repairs:project.repairs});setNote('Editable SVG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
+  const exportPng=async()=>{setBusy(true);try{await exportMapPng({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.png`,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places,repairs:project.repairs,roadChoices:project.roadChoices});setNote('Print PNG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
+  const exportSvg=async()=>{setBusy(true);try{const map=liveMapRef.current;if(!map)throw new Error('The live map is not ready yet.');await exportMapSvg({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.svg`,map,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places,repairs:project.repairs,roadChoices:project.roadChoices});setNote('Editable SVG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
   return <div className="shell">
     <header><b>STRictons <small>MAP STUDIO</small></b><input value={project.name} onChange={e=>patch('name',e.target.value)}/><div className="export-actions"><button onClick={exportPng} disabled={busy}>↓ PNG</button><button onClick={exportSvg} disabled={busy}>↓ SVG</button></div></header>
     <aside>
@@ -273,6 +304,18 @@ export default function App(){
         <div className="grid"><label>Width<input type="number" disabled={locked} value={project.size.widthMm} onChange={e=>size('widthMm',+e.target.value)}/></label><label>Height<input type="number" disabled={locked} value={project.size.heightMm} onChange={e=>size('heightMm',+e.target.value)}/></label><label>Bleed<input type="number" disabled={locked} value={project.size.bleedMm} onChange={e=>size('bleedMm',+e.target.value)}/></label><label>DPI<select disabled={locked} value={project.size.dpi} onChange={e=>size('dpi',+e.target.value)}><option>150</option><option>200</option><option>300</option></select></label></div>
         <div className="info"><small>Output canvas</small><b>{px.width.toLocaleString()} × {px.height.toLocaleString()} px</b></div>
         <h3>Location <em>OpenStreetMap search</em></h3><form onSubmit={search}><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Suburb, venue or address"/><button>⌕</button></form>{results.length>0&&<div className="results">{results.map(r=><button key={r.place_id} onClick={()=>go(r)}><b>{r.display_name.split(',')[0]}</b><small>{r.display_name}</small></button>)}</div>}<p className="help">Manual, cached Nominatim search. Configure VITE_GEOCODER_URL for production.</p>
+        {locked&&<div className="road-choice-box">
+          <h3>Selected road section <em>junction to junction</em></h3>
+          {selectedRoad?<><p className="road-choice-name">{selectedRoad.name}</p>
+            <p className="help">{selectedRoad.category} · {selectedRoad.selectionHint}</p>
+            <label><input type="checkbox" checked={false} onChange={()=>chooseRoad('show')}/> Always show this section</label>
+            <label><input type="checkbox" checked={false} onChange={()=>chooseRoad('hide')}/> Hide this section</label>
+            <button type="button" className="road-choice-cancel" onClick={()=>setSelectedRoad(null)}>Cancel selection</button>
+          </>:<p className="help">Choose “Select road” above the map, then click a road while zoomed in. Only the highlighted section will change.</p>}
+        </div>}
+        <h3>Road visibility choices <em>{project.roadChoices.length} saved</em></h3>
+        <p className="help">Sections are stored as editable geometry, independent of how far you zoom out. Remove an entry to restore its default display.</p>
+        <div className="repair-list">{project.roadChoices.length===0?<p className="help">No custom visibility choices yet.</p>:project.roadChoices.map((choice,index)=><article key={choice.id}><span>{String(index+1).padStart(2,'0')}</span><div><b>{choice.name}</b><small>{choice.mode==='show'?'Always show':'Hide'} · {choice.category}</small></div><button type="button" aria-label={'Remove choice for '+choice.name} onClick={()=>removeRoadChoice(choice.id)}>×</button></article>)}</div>
         <h3>Verified road repairs <em>{project.repairs.length} saved</em></h3>
         <p className="help">Only road geometry found in the underlying map source is restored. Select a road below to remove that correction.</p>
         <div className="repair-list">{project.repairs.length===0?<p className="help">No repairs saved yet.</p>:project.repairs.map((repair,index)=><article key={repair.id}><span>{String(index+1).padStart(2,'0')}</span><div><b>{repair.name}</b><small>{repair.category} · {repair.roadClass}</small></div><button type="button" aria-label={'Remove '+repair.name} onClick={()=>patch('repairs',project.repairs.filter(item=>item.id!==repair.id))}>×</button></article>)}</div>
@@ -291,7 +334,7 @@ export default function App(){
       </>}
       </div>
     </aside>
-    <main><div className="bar"><div className="edit-toolbar"><span>● OSM vector base</span>{!locked?<button className="lock-action" onClick={lockCanvas}>Lock canvas · Edit roads</button>:<><strong>● Canvas locked</strong><button onClick={()=>{setSelecting(true);setSelection(null)}} className={selecting?'active':''}>Draw selection</button><button disabled={!selection||checking} onClick={checkRepair}>{checking?'Checking...':'Check & repair roads'}</button><button disabled={!lastRepairIds.length} onClick={undoRepairs}>Undo repair</button><button className="lock-action" onClick={returnToCanvas}>↩ Return to canvas</button></>}</div><code>{project.camera.center[1].toFixed(4)}, {project.camera.center[0].toFixed(4)} · z{project.camera.zoom.toFixed(1)}</code></div><div className="stage"><div className="canvas" style={{aspectRatio:String(ratio),width:`min(92cqw, 1000px, calc(92cqh * ${ratio}))`}}><MapView project={project} pick={pick} locked={locked} selecting={selecting} selection={selection} onCamera={c=>{if(locked){setSelection(null)}else{patch('camera',c)}}} onPick={add} onViewport={setViewport} onMapReady={map=>{liveMapRef.current=map}} onSelection={area=>{setSelection(area);setSelecting(false);if(area)setRepairStatus('Area selected. Click Check & repair roads.')}}/></div></div><footer><span>{locked ? repairStatus || 'Saved canvas locked. Inspect and select an incomplete road.' : 'Drag to pan · scroll to zoom · OpenFreeMap © OpenMapTiles · Data from OpenStreetMap'}</span><code>{px.width.toLocaleString()} × {px.height.toLocaleString()} px @ {project.size.dpi} dpi</code></footer></main>
+    <main><div className="bar"><div className="edit-toolbar"><span>● OSM vector base</span>{!locked?<button className="lock-action" onClick={lockCanvas}>Lock canvas · Edit roads</button>:<><strong>● Canvas locked</strong><button className={roadPicking?'active':''} onClick={()=>{setRoadPicking(v=>!v);setSelecting(false);setSelection(null);setSelectedRoad(null);setTab('document')}}>Select road</button><button onClick={()=>{setSelecting(true);setRoadPicking(false);setSelectedRoad(null);setSelection(null)}} className={selecting?'active':''}>Draw selection</button><button disabled={!selection||checking} onClick={checkRepair}>{checking?'Checking...':'Check & repair roads'}</button><button disabled={!lastRepairIds.length} onClick={undoRepairs}>Undo repair</button><button className="lock-action" onClick={returnToCanvas}>↩ Return to canvas</button></>}</div><code>{project.camera.center[1].toFixed(4)}, {project.camera.center[0].toFixed(4)} · z{project.camera.zoom.toFixed(1)}</code></div><div className="stage"><div className="canvas" style={{aspectRatio:String(ratio),width:`min(92cqw, 1000px, calc(92cqh * ${ratio}))`}}><MapView project={project} pick={pick} locked={locked} selecting={selecting} selection={selection} roadPicking={roadPicking} selectedRoad={selectedRoad} onCamera={c=>{if(locked){setSelection(null)}else{patch('camera',c)}}} onPick={add} onViewport={setViewport} onMapReady={map=>{liveMapRef.current=map}} onSelection={area=>{setSelection(area);setSelecting(false);if(area)setRepairStatus('Area selected. Click Check & repair roads.')}} onRoadClick={road=>{setSelectedRoad(road);setTab('document');setRepairStatus(road?'Section selected. Choose Always show or Hide in the Document panel.':'No road data found at that point. Zoom in further and try again.')}}/></div></div><footer><span>{locked ? repairStatus || 'Saved canvas locked. Inspect and select an incomplete road.' : 'Drag to pan · scroll to zoom · OpenFreeMap © OpenMapTiles · Data from OpenStreetMap'}</span><code>{px.width.toLocaleString()} × {px.height.toLocaleString()} px @ {project.size.dpi} dpi</code></footer></main>
     {note&&<div className="toast">{note}</div>}
   </div>
 }
