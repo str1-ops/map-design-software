@@ -1,6 +1,6 @@
 import type { Map, StyleSpecification } from 'maplibre-gl'
 import { ensureRoadRepairLayers, type RoadRepair } from './roadRepairs'
-import { ensureRoadChoiceLayers, visibleRoadAppearance, projectIncludedRoad, includedRoadCoordinates, type RoadOverride } from './roadChoices'
+import { ensureRoadChoiceLayers, visibleRoadAppearance, visibleIncludedRoadParts, type RoadOverride } from './roadChoices'
 
 export const BASE_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty'
 export const FEATURED_SOURCE_ID = 'strictons-featured-places'
@@ -653,12 +653,15 @@ async function renderMapCanvas(args: ExportMapArgs) {
         if(choice.mode!=='show'||choice.coordinates.length<2)continue
         const appearance=visibleRoadAppearance(args.theme,choice.category,exportMap.getZoom(),exportMap,choice.roadClass,choice.coordinates)
         ctx.beginPath()
-        projectIncludedRoad(exportMap,choice).forEach((p,index)=>{
-          if(index===0)ctx.moveTo(p.x,p.y)
-          else ctx.lineTo(p.x,p.y)
-        })
+        for(const points of visibleIncludedRoadParts(exportMap,choice,args.roadChoices)){
+          points.forEach((p,index)=>{
+            if(index===0)ctx.moveTo(p.x,p.y)
+            else ctx.lineTo(p.x,p.y)
+          })
+        }
         ctx.strokeStyle=appearance.colour
         ctx.lineWidth=appearance.width
+        ctx.lineCap='butt'
         ctx.stroke()
       }
       ctx.restore()
@@ -1505,8 +1508,8 @@ export async function exportMapSvg(args: ExportSvgArgs) {
 
   for(const choice of args.roadChoices){
     if(choice.mode!=='show' || !roadCategories.has(choice.category))continue
-    const geometry={type:'LineString',coordinates:includedRoadCoordinates(map,choice)}
-    const d=geometryPath(map,geometry,sx,sy,width,height)
+    const lines=visibleIncludedRoadParts(map,choice,args.roadChoices)
+    const d=lines.map(points=>clippedPolylinePath(points.map(p=>({x:p.x*sx,y:p.y*sy})),width,height)).filter(Boolean).join(' ')
     if(!d)continue
     const roads=namedRoadGroups.get(choice.category)!
     const key='always|'+choice.name.toLowerCase()+'|'+choice.roadClass
@@ -1519,7 +1522,7 @@ export async function exportMapSvg(args: ExportSvgArgs) {
     const appearance=visibleRoadAppearance(args.theme,choice.category,map.getZoom(),map,choice.roadClass,choice.coordinates)
     const pathId=svgId('Always Show '+choice.name)+'_'+String(number).padStart(2,'0')+'_'+(++objectNumber)
     road.items.push(
-      '<path id="'+pathId+'" data-name="'+escapeXml(choice.name)+' (always show)" data-road-class="'+escapeXml(choice.roadClass)+'" d="'+d+'" fill="none" stroke="'+escapeXml(appearance.colour)+'" stroke-width="'+(appearance.width*strokeScale).toFixed(2)+'" stroke-linecap="round" stroke-linejoin="round"/>'
+      '<path id="'+pathId+'" data-name="'+escapeXml(choice.name)+' (always show)" data-road-class="'+escapeXml(choice.roadClass)+'" d="'+d+'" fill="none" stroke="'+escapeXml(appearance.colour)+'" stroke-width="'+(appearance.width*strokeScale).toFixed(2)+'" stroke-linecap="butt" stroke-linejoin="round"/>'
     )
   }
 
