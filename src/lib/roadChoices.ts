@@ -11,7 +11,18 @@ export type RoadOverride = {
   mode:RoadOverrideMode
   coordinates:[number,number][]
 }
-export type SelectedRoad = Omit<RoadOverride,'id'|'mode'> & { selectionHint:string }
+export type RoadJunction = {
+  index:number
+  coordinates:[number,number]
+  kind:'intersection'|'endpoint'
+}
+export type SelectedRoad = Omit<RoadOverride,'id'|'mode'> & {
+  selectionHint:string
+  routeCoordinates:[number,number][]
+  junctions:RoadJunction[]
+  startIndex:number
+  endIndex:number
+}
 
 const SOURCE='strictons-road-choices'
 const SHOW='strictons-road-choices-show'
@@ -19,6 +30,9 @@ const HIDE='strictons-road-choices-hide'
 const SELECT_SOURCE='strictons-road-current-choice'
 const SELECT_HALO='strictons-road-choice-halo'
 const SELECT_LINE='strictons-road-choice-highlight'
+const JUNCTION_SOURCE='strictons-road-choice-junctions'
+const JUNCTION_MARKERS='strictons-road-choice-junction-markers'
+export const JUNCTION_HIT_LAYER='strictons-road-choice-junction-hit'
 
 type P={x:number;y:number}
 type RoadLine={
@@ -171,84 +185,181 @@ function resolveName(line:RoadLine,names:NameCandidate[]) {
     ?best.name+' ('+best.ref+')':best.name||'Route '+best.ref
   return 'Unnamed '+line.roadClass.replace(/_/g,' ')+' road'
 }
-function pointSame(a:P,b:P,tolerance:number) {
-  return Math.hypot(a.x-b.x,a.y-b.y)<=tolerance
+function sameCoordinate(a:[number,number],b:[number,number]) {
+  // A sub-metre tolerance joins the fragments of one road without joining
+  // streets that merely pass near each other.
+  const metersX=(a[0]-b[0])*111320*Math.cos(a[1]*Math.PI/180)
+  const metersY=(a[1]-b[1])*111320
+  return Math.hypot(metersX,metersY)<0.6
 }
-function vertexJunctions(line:RoadLine,lines:RoadLine[]) {
-  const nodes=new Set<number>([0,line.points.length-1])
-  // OSM ways can continue straight across multiple segments. A junction is a
-  // shared mapped vertex with another, non-collinear road, not just a line crossing.
-  // Grade-separated roads with no shared vertex therefore are not split.
-  const tolerance=1.35
-  for(let i=1;i<line.points.length-1;i++){
-    const vertex=line.points[i]
-    const directionA=line.points[i-1]
-    const directionB=line.points[i+1]
-    const ux=directionB.x-directionA.x,uy=directionB.y-directionA.y
-    const un=Math.hypot(ux,uy)
-    for(const other of lines){
-      if(other===line)continue
-      const endpoints=[other.points[0],other.points[other.points.length-1]]
-      // An independent way often ends at a T junction midway along the candidate way.
-      // Shared intermediate vertices are also accepted if directions diverge.
-      if(!endpoints.some((p)=>pointSame(p,vertex,tolerance))&&
-         !other.points.some((p)=>pointSame(p,vertex,tolerance)))continue
-      let direction:P|undefined
-      for(let j=0;j<other.points.length;j++){
-        if(!pointSame(other.points[j],vertex,tolerance))continue
-        direction=other.points[j+1]||other.points[j-1]
-        break
+
+function extendRoad(base:RoadLine,all:RoadLine[]):[number,number][] {
+  let route=[...base.coordinates]
+  const used=new Set([base.key])
+  for(let iteration=0;iteration<48&&route.length<2500;iteration++){
+    let extended=false
+    for(const end of ['start','end'] as const){
+      const anchor=end==='start'?route[0]:route[route.length-1]
+      const inside=end==='start'?route[1]:route[route.length-2]
+      const inwardX=(inside[0]-anchor[0])*Math.cos(anchor[1]*Math.PI/180)
+      const inwardY=inside[1]-anchor[1]
+      const inwardLen=Math.hypot(inwardX,inwardY)
+      if(inwardLen<1e-10)continue
+      const options:{road:RoadLine;coords:[number,number][];cosine:number}[]=[]
+      for(const candidate of all){
+        if(used.has(candidate.key)||candidate.roadClass!==base.roadClass)continue
+        // Two explicitly different street names must never be joined as one.
+        if(base.name&&candidate.name&&candidate.name!==base.name)continue
+        const points=candidate.coordinates
+        let coords:[number,number][]|null=null
+        if(end==='start'){
+          if(sameCoordinate(points[points.length-1],anchor))coords=points
+          else if(sameCoordinate(points[0],anchor))coords=[...points].reverse()
+        }else{
+          if(sameCoordinate(points[0],anchor))coords=points
+          else if(sameCoordinate(points[points.length-1],anchor))coords=[...points].reverse()
+        }
+        if(!coords||coords.length<2)continue
+        const next=end==='start'?coords[coords.length-2]:coords[1]
+        const dx=(next[0]-anchor[0])*Math.cos(anchor[1]*Math.PI/180)
+        const dy=next[1]-anchor[1]
+        const length=Math.hypot(dx,dy)
+        if(length<1e-10)continue
+        const cosine=(dx*inwardX+dy*inwardY)/(length*inwardLen)
+        const minimum=base.name&&candidate.name? -0.35 : -0.78
+        if(cosine>minimum)continue
+        options.push({road:candidate,coords,cosine})
       }
-      if(!direction)continue
-      const vx=direction.x-vertex.x,vy=direction.y-vertex.y
-      const vn=Math.hypot(vx,vy)
-      if(un<0.01||vn<0.01)continue
-      const alignment=Math.abs((ux*vx+uy*vy)/(un*vn))
-      if(alignment<0.94){nodes.add(i);break}
+      options.sort((a,b)=>a.cosine-b.cosine)
+      if(!options.length)continue
+      // Do not guess which branch continues the street at ambiguous junctions.
+      if(options.length>1&&Math.abs(options[0].cosine-options[1].cosine)<0.045)continue
+      const chosen=options[0]
+      used.add(chosen.road.key)
+      route=end==='start'
+        ? [...chosen.coords.slice(0,-1),...route]
+        : [...route,...chosen.coords.slice(1)]
+      extended=true
+    }
+    if(!extended)break
+  }
+  return cleanLine(route)
+}
+
+function roadJunctions(map:Map,route:[number,number][],all:RoadLine[]):RoadJunction[] {
+  const lookup=new Map<string,{index:number;directions:number[]}[]>()
+  const key=(coord:[number,number])=>coord[0].toFixed(6)+','+coord[1].toFixed(6)
+  for(let i=0;i<route.length;i++){
+    const k=key(route[i])
+    const entries=lookup.get(k)||[]
+    entries.push({index:i,directions:[]})
+    lookup.set(k,entries)
+  }
+  // Build a local angular graph from mapped vertices. T-junctions have
+  // three or more unique outgoing arms; an overpass with no shared vertex
+  // is deliberately not treated as a junction.
+  for(const line of all){
+    for(let i=0;i<line.coordinates.length;i++){
+      const matches=lookup.get(key(line.coordinates[i]))
+      if(!matches)continue
+      const origin=line.coordinates[i]
+      for(const adjacent of [line.coordinates[i-1],line.coordinates[i+1]]){
+        if(!adjacent)continue
+        const dx=(adjacent[0]-origin[0])*Math.cos(origin[1]*Math.PI/180)
+        const dy=adjacent[1]-origin[1]
+        if(Math.hypot(dx,dy)<1e-10)continue
+        const angle=Math.atan2(dy,dx)
+        for(const match of matches)match.directions.push(angle)
+      }
     }
   }
-  return [...nodes].sort((a,b)=>a-b)
+  const junctions:RoadJunction[]=[]
+  for(let i=0;i<route.length;i++){
+    const match=lookup.get(key(route[i]))?.find(entry=>entry.index===i)
+    const unique:number[]=[]
+    for(const angle of match?.directions||[]){
+      if(!unique.some(existing=>Math.abs(Math.atan2(Math.sin(angle-existing),Math.cos(angle-existing)))<0.19)){
+        unique.push(angle)
+      }
+    }
+    if(i===0||i===route.length-1){
+      junctions.push({index:i,coordinates:route[i],kind:'endpoint'})
+    }else if(unique.length>=3){
+      junctions.push({index:i,coordinates:route[i],kind:'intersection'})
+    }
+  }
+  // Where maps do not identify any intersections, the actual source-way
+  // endpoints remain available; do not invent intermediary junctions.
+  return junctions
 }
+
+function selectedRoadHint(selected:SelectedRoad) {
+  const start=selected.junctions.find(p=>p.index===selected.startIndex)
+  const end=selected.junctions.find(p=>p.index===selected.endIndex)
+  return start?.kind==='intersection'&&end?.kind==='intersection'
+    ?'Selection runs between mapped road junctions. Blue dots can adjust either end.'
+    :'Blue dots mark mapped junctions and available road boundaries. Adjust either end before saving.'
+}
+
+export function adjustRoadSelection(
+  selected:SelectedRoad,boundary:'start'|'end',junctionIndex:number
+):SelectedRoad|null {
+  if(!Number.isInteger(junctionIndex)||!selected.junctions.some(point=>point.index===junctionIndex))return null
+  const startIndex=boundary==='start'?junctionIndex:selected.startIndex
+  const endIndex=boundary==='end'?junctionIndex:selected.endIndex
+  if(startIndex>=endIndex)return null
+  const updated:SelectedRoad={
+    ...selected,startIndex,endIndex,
+    coordinates:selected.routeCoordinates.slice(startIndex,endIndex+1)
+  }
+  return {...updated,selectionHint:selectedRoadHint(updated)}
+}
+
 export function selectRoadAt(map:Map,click:{x:number;y:number}):SelectedRoad|null {
   const near:P={x:click.x,y:click.y}
   const lines=sourceRoads(map,near)
   if(!lines.length)return null
   let nearest:RoadLine|undefined
   let best=15
+  let bestCoordinate:[number,number][]|null=null
   let bestSegment=0
   for(const line of lines){
     for(let i=1;i<line.points.length;i++){
       const distance=segmentDistance(near,line.points[i-1],line.points[i])
       if(distance<best){
-        best=distance;nearest=line;bestSegment=i-1
+        best=distance;nearest=line;bestCoordinate=line.coordinates;bestSegment=i-1
       }
     }
   }
-  if(!nearest)return null
-  // Only examine ways near the clicked way when locating junctions. This also
-  // avoids checking every source-tile road for every vertex on a long route.
-  const xmin=Math.min(...nearest.points.map(p=>p.x))-3
-  const xmax=Math.max(...nearest.points.map(p=>p.x))+3
-  const ymin=Math.min(...nearest.points.map(p=>p.y))-3
-  const ymax=Math.max(...nearest.points.map(p=>p.y))+3
-  const localLines=lines.filter(other=>other===nearest ||
-    other.points.some(p=>p.x>=xmin&&p.x<=xmax&&p.y>=ymin&&p.y<=ymax))
-  const junctions=vertexJunctions(nearest,localLines)
-  let from=0,to=nearest.points.length-1
-  for(const i of junctions){
-    if(i<=bestSegment)from=i
-    if(i>=bestSegment+1){to=i;break}
+  if(!nearest||!bestCoordinate)return null
+  const initialEdge=bestCoordinate[bestSegment]
+  const nextEdge=bestCoordinate[bestSegment+1]
+  const routeCoordinates=extendRoad(nearest,lines)
+  const junctions=roadJunctions(map,routeCoordinates,lines)
+  let hitSegment=0,bestDistance=Infinity
+  const midpoint:[number,number]=[(initialEdge[0]+nextEdge[0])/2,(initialEdge[1]+nextEdge[1])/2]
+  const hit=point(map,midpoint)
+  const projectedRoute=routeCoordinates.map(c=>point(map,c))
+  for(let i=1;i<projectedRoute.length;i++){
+    const distance=segmentDistance(hit,projectedRoute[i-1],projectedRoute[i])
+    if(distance<bestDistance){bestDistance=distance;hitSegment=i-1}
   }
-  if(from>=to)return null
-  const coordinates=nearest.coordinates.slice(from,to+1)
-  return {
+  let startIndex=0,endIndex=routeCoordinates.length-1
+  for(const junction of junctions){
+    if(junction.index<=hitSegment)startIndex=junction.index
+    if(junction.index>=hitSegment+1){endIndex=junction.index;break}
+  }
+  if(startIndex>=endIndex)return null
+  const selected:SelectedRoad={
     name:resolveName(nearest,namesFromSource(map)),
-    roadClass:nearest.roadClass,category:nearest.category,coordinates,
-    selectionHint:from===0||to===nearest.points.length-1
-      ?'Section ends at mapped junctions or current source-tile boundaries.'
-      :'Section ends at two mapped road junctions.'
+    roadClass:nearest.roadClass,category:nearest.category,
+    coordinates:routeCoordinates.slice(startIndex,endIndex+1),
+    routeCoordinates,junctions,startIndex,endIndex,
+    selectionHint:''
   }
+  return {...selected,selectionHint:selectedRoadHint(selected)}
 }
+
 const collection=(items:(RoadOverride|SelectedRoad)[])=>({
   type:'FeatureCollection' as const,
   features:items.map((item)=>({
