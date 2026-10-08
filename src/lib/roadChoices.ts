@@ -27,12 +27,6 @@ export type SelectedRoad = Omit<RoadOverride,'id'|'mode'> & {
 const SOURCE='strictons-road-choices'
 const SHOW='strictons-road-choices-show'
 const HIDE='strictons-road-choices-hide'
-const SELECT_SOURCE='strictons-road-current-choice'
-const SELECT_HALO='strictons-road-choice-halo'
-const SELECT_LINE='strictons-road-choice-highlight'
-const JUNCTION_SOURCE='strictons-road-choice-junctions'
-const JUNCTION_MARKERS='strictons-road-choice-junction-markers'
-export const JUNCTION_HIT_LAYER='strictons-road-choice-junction-hit'
 
 type P={x:number;y:number}
 type RoadLine={
@@ -384,40 +378,12 @@ function themeWidth(theme:MapTheme,boost=1) {
   ] as any
 }
 export function ensureRoadChoiceLayers(
-  map:Map, choices:RoadOverride[], selected:SelectedRoad|null,theme:MapTheme,visibility:LayerVisibility
+  map:Map, choices:RoadOverride[], _selected:SelectedRoad|null,theme:MapTheme,visibility:LayerVisibility
 ) {
   if(!map.isStyleLoaded())return
   const source=map.getSource(SOURCE) as any
   if(source)source.setData(collection(choices))
   else map.addSource(SOURCE,{type:'geojson',data:collection(choices)} as any)
-  const selectedSource=map.getSource(SELECT_SOURCE) as any
-  if(selectedSource)selectedSource.setData(collection(selected?[selected]:[]))
-  else map.addSource(SELECT_SOURCE,{type:'geojson',data:collection(selected?[selected]:[])} as any)
-
-  // Up to five junctions beyond each endpoint are shown, plus every junction
-  // within the selection. Larger routes will not flood the map with markers.
-  const marks=selected?selected.junctions.filter((junction,index,all)=>{
-    const start=all.findIndex(item=>item.index===selected.startIndex)
-    const end=all.findIndex(item=>item.index===selected.endIndex)
-    return index>=Math.max(0,start-5)&&index<=Math.min(all.length-1,end+5)
-  }):[]
-  const pointData={
-    type:'FeatureCollection' as const,
-    features:marks.map(junction=>({
-      type:'Feature' as const,
-      properties:{
-        index:junction.index,
-        kind:junction.kind,
-        role: selected && junction.index===selected.startIndex?'start':
-          selected && junction.index===selected.endIndex?'end':'junction'
-      },
-      geometry:{type:'Point' as const,coordinates:junction.coordinates}
-    }))
-  }
-  const junctionSource=map.getSource(JUNCTION_SOURCE) as any
-  if(junctionSource)junctionSource.setData(pointData)
-  else map.addSource(JUNCTION_SOURCE,{type:'geojson',data:pointData} as any)
-
   // Above land detail and roads, below labels. OSM geometry remains unchanged.
   const firstLabel=(map.getStyle().layers as any[]).find((layer)=>layer.type==='symbol'&&!String(layer.id).startsWith('strictons-'))?.id
   const add=(id:string,sourceId:string,filter:any,paint:any,top=false)=>{
@@ -429,36 +395,10 @@ export function ensureRoadChoiceLayers(
       } as any,top?undefined:firstLabel)
     }
   }
-  const addPoint=(id:string,paint:any)=>{
-    if(!map.getLayer(id)){
-      map.addLayer({
-        id,type:'circle',source:JUNCTION_SOURCE,
-        paint
-      } as any)
-    }
-  }
   add(HIDE,SOURCE,['==',['get','mode'],'hide'],
     {'line-color':theme.land,'line-width':themeWidth(theme,1.34)})
   add(SHOW,SOURCE,['==',['get','mode'],'show'],
     {'line-color':themeColour(theme),'line-width':themeWidth(theme)})
-  add(SELECT_HALO,SELECT_SOURCE,undefined,
-    {'line-color':'#ffffff','line-opacity':1,'line-width':14},true)
-  add(SELECT_LINE,SELECT_SOURCE,undefined,
-    {'line-color':'#1378ed','line-width':7,'line-opacity':1},true)
-  addPoint(JUNCTION_MARKERS,{
-    'circle-radius':['match',['get','role'],'start',9,'end',9,6.5],
-    'circle-color':['match',['get','role'],'start','#075bbd','end','#1378ed','#a7d5ff'],
-    'circle-stroke-width':2.5,
-    'circle-stroke-color':'#ffffff',
-    'circle-opacity':1
-  })
-  // A generous hit area makes the junctions practical to select on a laptop.
-  addPoint(JUNCTION_HIT_LAYER,{
-    'circle-radius':16,
-    'circle-color':'#1378ed',
-    'circle-opacity':0.005,
-    'circle-stroke-opacity':0
-  })
   const set=(id:string,property:string,value:unknown)=>{
     try{(map as any).setPaintProperty(id,property,value)}catch{/* external style can reload */}
   }
