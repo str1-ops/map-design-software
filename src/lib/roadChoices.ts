@@ -445,6 +445,30 @@ function closestPointOnSegment(p:ScreenPoint,a:ScreenPoint,b:ScreenPoint):Screen
   const t=len>0?Math.max(0,Math.min(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/len)):0
   return {x:a.x+dx*t,y:a.y+dy*t}
 }
+function joinPoint(
+  endpoint:ScreenPoint,inside:ScreenPoint,
+  neighbourA:ScreenPoint,neighbourB:ScreenPoint
+):{point:ScreenPoint;score:number}|null {
+  const dx=endpoint.x-inside.x,dy=endpoint.y-inside.y
+  const nx=neighbourB.x-neighbourA.x,ny=neighbourB.y-neighbourA.y
+  const len=Math.hypot(dx,dy),otherLen=Math.hypot(nx,ny)
+  if(len<.1||otherLen<.1)return null
+  const cross=dx*ny-dy*nx
+  // A road continuing in the same direction must not be treated as a T.
+  const angle=Math.abs(cross)/(len*otherLen)
+  if(angle<.42)return null
+  if(Math.abs(cross)<1e-5)return null
+  const x=neighbourA.x-inside.x,y=neighbourA.y-inside.y
+  const along=(x*ny-y*nx)/cross
+  const other=(x*dy-y*dx)/cross
+  if(other<-.04||other>1.04)return null
+  const intersection={x:inside.x+along*dx,y:inside.y+along*dy}
+  const distance=Math.hypot(intersection.x-endpoint.x,intersection.y-endpoint.y)
+  // Only trim/extend a nearby real road junction, never draw a speculative
+  // connector from a separated street or across a parallel corridor.
+  if(distance>6||along<0||along>1+6/len)return null
+  return {point:intersection,score:distance}
+}
 export function projectIncludedRoad(map:Map,choice:Pick<RoadOverride,'coordinates'|'roadClass'>){
   const points=choice.coordinates.map(c=>{
     const p=map.project(c)
@@ -452,30 +476,32 @@ export function projectIncludedRoad(map:Map,choice:Pick<RoadOverride,'coordinate
   })
   if(points.length<2)return points
   const result=points.map(p=>({...p}))
-  // Snap only ends that are already almost on a mapped road. The small
-  // screen tolerance corrects low-zoom simplification without bridging gaps
-  // between unrelated roads, bridges, beaches or parallel streets.
   for(const index of [0,result.length-1]){
     const origin=points[index]
-    let nearest:ScreenPoint|undefined
-    let best=2.9 // CSS pixels, max
-    for(const feature of nearbyRoads(map,origin,7)){
+    const inside=points[index===0?1:points.length-2]
+    let junction:{point:ScreenPoint;score:number}|null=null
+    let closest:ScreenPoint|undefined
+    let closestDistance=1.6
+    for(const feature of nearbyRoads(map,origin,10)){
       const cls=String(feature.properties?.class||feature.properties?.subclass||'').toLowerCase()
-      if(!classCompatible(choice.roadClass,cls))continue
-      const roadName=String(feature.properties?.name||'')
-      // Location proximity is necessary; a matching name alone is not enough.
+      if(!cls)continue
       for(const line of featureLines(feature)){
         for(let i=1;i<line.length;i++){
           const a=point(map,line[i-1]),b=point(map,line[i])
-          const candidate=closestPointOnSegment(origin,a,b)
-          const dist=Math.hypot(origin.x-candidate.x,origin.y-candidate.y)
-          if(roadName && dist===0){nearest=origin;best=0;break}
-          if(dist<best){best=dist;nearest=candidate}
+          // A transverse intersection marks the centreline of a through-road.
+          // Snapping there prevents a dead-end from protruding past a T.
+          const candidate=joinPoint(origin,inside,a,b)
+          if(candidate && (!junction||candidate.score<junction.score))junction=candidate
+          if(classCompatible(choice.roadClass,cls)){
+            const pt=closestPointOnSegment(origin,a,b)
+            const d=Math.hypot(origin.x-pt.x,origin.y-pt.y)
+            if(d>0.02&&d<closestDistance){closest=pt;closestDistance=d}
+          }
         }
       }
-      if(best===0)break
     }
-    if(nearest)result[index]=nearest
+    if(junction)result[index]=junction.point
+    else if(closest)result[index]=closest
   }
   return result
 }
