@@ -5,6 +5,8 @@ export const FEATURED_SOURCE_ID = 'strictons-featured-places'
 export const FEATURED_DOT_LAYER_ID = 'strictons-featured-dots'
 export const FEATURED_LABEL_LAYER_ID = 'strictons-featured-labels'
 
+export type RailwayStyle = 'solid' | 'dashed' | 'double' | 'sleepers'
+
 export type MapTheme = {
   land: string
   water: string
@@ -17,6 +19,8 @@ export type MapTheme = {
   roadWidthScale: number
   minorRoadWidthScale: number
   railways: string
+  railwayStyle: RailwayStyle
+  railwayWidthScale: number
   boundaries: string
   labels: string
   labelHalo: string
@@ -74,6 +78,8 @@ export const DEFAULT_THEME: MapTheme = {
   roadWidthScale: 1,
   minorRoadWidthScale: 1,
   railways: '#8b8880',
+  railwayStyle: 'solid',
+  railwayWidthScale: 1,
   boundaries: '#b7b0a4',
   labels: '#282825',
   labelHalo: '#f2efe7',
@@ -333,6 +339,89 @@ function setLayoutSafe(map: Map, layerId: string, property: string, value: unkno
   }
 }
 
+function railwayOverlayId(layerId: string) {
+  return `strictons-rail-sleepers-${layerId}`
+}
+
+function ensureRailwaySleeperOverlay(map: Map, layer: any, theme: MapTheme, visible: boolean) {
+  const source = layer.source
+  const sourceLayer = layer['source-layer']
+  if (!source || !sourceLayer) return
+
+  const overlayId = railwayOverlayId(layer.id)
+  if (!map.getLayer(overlayId)) {
+    const style = map.getStyle() as StyleSpecification | undefined
+    const firstSymbol = (style?.layers as any[] | undefined)?.find((candidate) => candidate.type === 'symbol' && !candidate.id?.startsWith('strictons-'))?.id
+
+    try {
+      map.addLayer({
+        id: overlayId,
+        type: 'line',
+        source,
+        'source-layer': sourceLayer,
+        minzoom: layer.minzoom,
+        maxzoom: layer.maxzoom,
+        filter: layer.filter,
+        layout: {
+          visibility: 'none',
+          'line-cap': 'butt',
+          'line-join': 'round',
+        },
+        paint: {
+          'line-color': theme.railways,
+          'line-width': 3,
+          'line-dasharray': [0.18, 1.45],
+        },
+      } as any, firstSymbol)
+    } catch {
+      return
+    }
+  }
+
+  const baseWidth = getOriginalLineWidth(map, layer.id)
+  const sleeperWidth = scaledLineWidth(baseWidth, theme.railwayWidthScale * 3.2)
+  setPaintSafe(map, overlayId, 'line-color', theme.railways)
+  if (sleeperWidth !== undefined) setPaintSafe(map, overlayId, 'line-width', sleeperWidth)
+  setPaintSafe(map, overlayId, 'line-dasharray', [0.18, 1.45])
+  setLayoutSafe(map, overlayId, 'visibility', visible && theme.railwayStyle === 'sleepers' ? 'visible' : 'none')
+}
+
+function styleRailwayLayer(map: Map, layer: any, theme: MapTheme, visible: boolean) {
+  const id = layer.id
+  const baseWidth = getOriginalLineWidth(map, id)
+  const normalWidth = scaledLineWidth(baseWidth, theme.railwayWidthScale)
+
+  setPaintSafe(map, id, 'line-color', theme.railways)
+  setLayoutSafe(map, id, 'line-join', 'round')
+
+  if (theme.railwayStyle === 'dashed') {
+    if (normalWidth !== undefined) setPaintSafe(map, id, 'line-width', normalWidth)
+    setPaintSafe(map, id, 'line-gap-width', 0)
+    setPaintSafe(map, id, 'line-dasharray', [3.2, 2.2])
+    setLayoutSafe(map, id, 'line-cap', 'butt')
+  } else if (theme.railwayStyle === 'double') {
+    const railWidth = scaledLineWidth(baseWidth, theme.railwayWidthScale * 0.72)
+    const gapWidth = scaledLineWidth(baseWidth, theme.railwayWidthScale * 1.6)
+    if (railWidth !== undefined) setPaintSafe(map, id, 'line-width', railWidth)
+    if (gapWidth !== undefined) setPaintSafe(map, id, 'line-gap-width', gapWidth)
+    setPaintSafe(map, id, 'line-dasharray', null)
+    setLayoutSafe(map, id, 'line-cap', 'round')
+  } else if (theme.railwayStyle === 'sleepers') {
+    const railWidth = scaledLineWidth(baseWidth, theme.railwayWidthScale * 0.72)
+    if (railWidth !== undefined) setPaintSafe(map, id, 'line-width', railWidth)
+    setPaintSafe(map, id, 'line-gap-width', 0)
+    setPaintSafe(map, id, 'line-dasharray', null)
+    setLayoutSafe(map, id, 'line-cap', 'round')
+  } else {
+    if (normalWidth !== undefined) setPaintSafe(map, id, 'line-width', normalWidth)
+    setPaintSafe(map, id, 'line-gap-width', 0)
+    setPaintSafe(map, id, 'line-dasharray', null)
+    setLayoutSafe(map, id, 'line-cap', 'round')
+  }
+
+  ensureRailwaySleeperOverlay(map, layer, theme, visible)
+}
+
 export function applyMapDesign(map: Map, theme: MapTheme, visibility: LayerVisibility) {
   const style = map.getStyle() as StyleSpecification | undefined
   if (!style?.layers) return
@@ -357,7 +446,7 @@ export function applyMapDesign(map: Map, theme: MapTheme, visibility: LayerVisib
 
     if (layer.type === 'line') {
       if (isRailway(layer)) {
-        setPaintSafe(map, id, 'line-color', theme.railways)
+        styleRailwayLayer(map, layer, theme, visibility.railways)
       } else if (isBoundary(layer)) {
         setPaintSafe(map, id, 'line-color', theme.boundaries)
       } else if (isRoad(layer)) {
@@ -797,7 +886,7 @@ function fallbackLineWidth(category: string, theme: MapTheme) {
   if (category === 'Highways') return 2.4 * theme.highwayWidthScale
   if (category === 'Major Roads') return 1.6 * theme.roadWidthScale
   if (category === 'Minor Roads') return 0.85 * theme.minorRoadWidthScale
-  if (category === 'Railways') return 1
+  if (category === 'Railways') return 1 * theme.railwayWidthScale
   if (category === 'Boundaries') return 0.7
   return 0.8
 }
@@ -933,7 +1022,33 @@ export async function exportMapSvg(args: ExportSvgArgs) {
     const opacity = Number(styleValue(map, layerId, 'paint', 'line-opacity', properties, 1))
     const strokeWidth = Math.max(0.2, (Number.isFinite(rawWidth)?rawWidth:fallbackLineWidth(category,args.theme)) * strokeScale)
 
-    if (roadCategories.has(category)) {
+    if (category === 'Railways') {
+      const railId = `railway-${++objectNumber}`
+      const opacityValue = Number.isFinite(opacity) ? opacity : 1
+
+      if (args.theme.railwayStyle === 'dashed') {
+        groups.get('Railways')!.push(
+          `<path id="${railId}" data-name="Railway" data-style="dashed" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${opacityValue}" stroke-dasharray="${(strokeWidth*3.2).toFixed(2)} ${(strokeWidth*2.2).toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/>`
+        )
+      } else if (args.theme.railwayStyle === 'double') {
+        const outerWidth = strokeWidth * 2.8
+        const gapWidth = strokeWidth * 1.15
+        const maskId = `${railId}-mask`
+        groups.get('Railways')!.push(
+          `<g id="${railId}" data-name="Railway" data-style="double" data-layer="${escapeXml(layerId)}"><defs><mask id="${maskId}" maskUnits="userSpaceOnUse" x="0" y="0" width="${width}" height="${height}"><rect x="0" y="0" width="${width}" height="${height}" fill="white"/><path d="${d}" fill="none" stroke="black" stroke-width="${gapWidth.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/></mask></defs><path d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${outerWidth.toFixed(2)}" stroke-opacity="${opacityValue}" stroke-linecap="round" stroke-linejoin="round" mask="url(#${maskId})"/></g>`
+        )
+      } else if (args.theme.railwayStyle === 'sleepers') {
+        const railWidth = Math.max(0.2, strokeWidth * 0.72)
+        const sleeperWidth = Math.max(0.6, strokeWidth * 3.2)
+        groups.get('Railways')!.push(
+          `<g id="${railId}" data-name="Railway" data-style="sleepers" data-layer="${escapeXml(layerId)}"><path data-name="Rail" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${railWidth.toFixed(2)}" stroke-opacity="${opacityValue}" stroke-linecap="round" stroke-linejoin="round"/><path data-name="Sleepers" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${sleeperWidth.toFixed(2)}" stroke-opacity="${opacityValue}" stroke-dasharray="${(sleeperWidth*0.18).toFixed(2)} ${(sleeperWidth*1.45).toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/></g>`
+        )
+      } else {
+        groups.get('Railways')!.push(
+          `<path id="${railId}" data-name="Railway" data-style="solid" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${opacityValue}" stroke-linecap="round" stroke-linejoin="round"/>`
+        )
+      }
+    } else if (roadCategories.has(category)) {
       const identity = roadIdentity(properties, feature, layerId)
       const categoryRoads = namedRoadGroups.get(category)!
       let road = categoryRoads.get(identity.key)
