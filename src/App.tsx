@@ -9,7 +9,8 @@ import {
   type MapTheme, type PrintSize,
 } from './lib/mapDesign'
 import { ensureRoadRepairLayers, findRoadRepairs, type RoadSelection, type RoadRepair } from './lib/roadRepairs'
-import { ensureRoadChoiceLayers, selectRoadAt, adjustRoadSelection, JUNCTION_HIT_LAYER, type RoadOverride, type SelectedRoad } from './lib/roadChoices'
+import { ensureRoadChoiceLayers, selectRoadAt, adjustRoadSelection, type RoadOverride, type SelectedRoad } from './lib/roadChoices'
+import RoadSelectionOverlay from './components/RoadSelectionOverlay'
 
 maplibregl.setWorkerUrl(workerUrl)
 
@@ -87,18 +88,6 @@ function MapView({project,pick,locked,selecting,selection,roadPicking,selectedRo
     })
     map.on('click',e=>{
       if(latest.current.roadPicking){
-        // Check editable junction handles first; otherwise clicking a handle
-        // would simply start another road selection underneath it.
-        if(latest.current.selectedRoad && map.getLayer(JUNCTION_HIT_LAYER)){
-          try{
-            const hits=map.queryRenderedFeatures(e.point,{layers:[JUNCTION_HIT_LAYER]})
-            const index=Number(hits[0]?.properties?.index)
-            if(hits.length && Number.isInteger(index)){
-              latest.current.onJunctionClick(index)
-              return
-            }
-          }catch{/* selection marker tiles may still be updating */}
-        }
         latest.current.onRoadClick(selectRoadAt(map,{x:e.point.x,y:e.point.y}))
         return
       }
@@ -205,6 +194,9 @@ function MapView({project,pick,locked,selecting,selection,roadPicking,selectedRo
   return <>
     <div className="paper">
       <div ref={host} className="map"/>
+      {roadPicking && !selecting && selectedRoad &&
+        <RoadSelectionOverlay map={mapRef.current} road={selectedRoad}
+          boundary={editingBoundary} onJunctionClick={onJunctionClick}/>}
       {selectionRect&&!selecting&&<div className="repair-area" style={selectionRect}/>}
       {selecting&&<div className="repair-selector" onPointerDown={onPointerDown}
         onPointerMove={onPointerMove} onPointerUp={onPointerUp}
@@ -220,7 +212,7 @@ function MapView({project,pick,locked,selecting,selection,roadPicking,selectedRo
     <div className="canvas-meta">{project.size.widthMm} × {project.size.heightMm} mm{locked?' · Saved canvas locked':''}</div>
     {pick&&<div className="pick-chip">Click a place on the map</div>}
     {selecting&&<div className="pick-chip">Drag a rectangle around the incomplete roads</div>}
-    {roadPicking&&!selecting&&<div className="pick-chip">{selectedRoad?'Blue road is selected. Click a junction dot to adjust '+editingBoundary+'.':'Click a road to highlight it blue, then adjust junctions or choose Show / Hide.'}</div>}
+    {roadPicking&&!selecting&&<div className="pick-chip">{selectedRoad?'Blue road selected. Tap a blue junction dot to change the '+editingBoundary+'.':'Click a road to highlight it blue, then adjust endpoints or choose Show / Hide.'}</div>}
   </>
 }
 
