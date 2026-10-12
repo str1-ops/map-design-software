@@ -637,10 +637,77 @@ type ExportMapArgs = {
   featuredPlaces: FeaturedPlace[]
   repairs: RoadRepair[]
   roadChoices: RoadOverride[]
+  // Snapshot of the complete railway geometry already visible in the editor.
+  // Export maps can load tiles asynchronously, so retain this as a fallback.
+  railwaySnapshot?: RailwayArtwork | null
 }
 
 type ExportSvgArgs = ExportMapArgs & {
   map: Map
+}
+
+// Draw the exact connected railway artwork into a transparent print-resolution
+// overlay. PNG rendering must not depend on MapLibre having repainted a newly
+// created GeoJSON layer before canvas capture.
+function hasRailwayGeometry(artwork: RailwayArtwork | null | undefined): artwork is RailwayArtwork {
+  return !!artwork?.paths.features.some(feature => feature.geometry.coordinates.length > 1)
+}
+
+function drawRailwayOnExport(
+  output: HTMLCanvasElement, map: Map, theme: MapTheme, artwork: RailwayArtwork,
+  logicalWidth: number, logicalHeight: number,
+) {
+  const layer = document.createElement('canvas')
+  layer.width = output.width
+  layer.height = output.height
+  const ctx = layer.getContext('2d')
+  const outputCtx = output.getContext('2d')
+  if (!ctx || !outputCtx) throw new Error('Could not prepare the railway export layer.')
+
+  ctx.scale(output.width / logicalWidth, output.height / logicalHeight)
+  ctx.strokeStyle = theme.railways
+  ctx.lineJoin = 'round'
+  const width = RAILWAY_BASE_WIDTH * theme.railwayWidthScale
+  const trace = (features: RailwayArtwork['paths']['features']) => {
+    ctx.beginPath()
+    for (const feature of features) {
+      const points = feature.geometry.coordinates
+      if (points.length < 2) continue
+      points.forEach((coordinate, index) => {
+        const point = map.project(coordinate)
+        if (index === 0) ctx.moveTo(point.x, point.y)
+        else ctx.lineTo(point.x, point.y)
+      })
+    }
+  }
+  const stroke = (collection: RailwayArtwork['paths'], thickness: number, cap: CanvasLineCap) => {
+    ctx.globalCompositeOperation = 'source-over'
+    ctx.lineWidth = thickness
+    ctx.lineCap = cap
+    trace(collection.features)
+    ctx.stroke()
+  }
+
+  if (theme.railwayStyle === 'dashed') {
+    stroke(artwork.dashes, width, 'butt')
+  } else if (theme.railwayStyle === 'sleepers') {
+    stroke(artwork.paths, width * 0.72, 'round')
+    stroke(artwork.sleepers, width * 3.2, 'butt')
+  } else if (theme.railwayStyle === 'double') {
+    const gap = width * 1.6
+    const rail = width * 0.72
+    stroke(artwork.paths, gap + rail * 2, 'round')
+    // Erase the middle only from this transparent overlay, NOT from the
+    // underlying map. This creates two crisp parallel rails around one path.
+    ctx.globalCompositeOperation = 'destination-out'
+    ctx.lineWidth = gap
+    ctx.lineCap = 'round'
+    trace(artwork.paths.features)
+    ctx.stroke()
+  } else {
+    stroke(artwork.paths, width, 'round')
+  }
+  outputCtx.drawImage(layer, 0, 0)
 }
 
 async function renderMapCanvas(args: ExportMapArgs) {
@@ -687,6 +754,11 @@ async function renderMapCanvas(args: ExportMapArgs) {
         ensureFeaturedLayers(exportMap, args.featuredPlaces, args.theme)
         ensureRoadRepairLayers(exportMap, args.repairs, args.theme, args.visibility)
         ensureRoadChoiceLayers(exportMap, args.roadChoices, null, args.theme, args.visibility)
+        // The railway is explicitly composited from GeoJSON below. Hide the
+        // map's railway layers to avoid painting the same route twice.
+        for (const id of [RAILWAY_LAYER_ID, RAILWAY_DASH_LAYER_ID, RAILWAY_SLEEPER_LAYER_ID]) {
+          setLayoutSafe(exportMap, id, 'visibility', 'none')
+        }
         const initialRailwayRevision = railwayRevision(exportMap)
         exportMap.once('idle', () => {
           // The first idle may reconstruct rails from newly arrived tiles.
@@ -708,6 +780,19 @@ async function renderMapCanvas(args: ExportMapArgs) {
     const ctx = output.getContext('2d')
     if (!ctx) throw new Error('Could not create the export canvas.')
     ctx.drawImage(exportMap.getCanvas(), 0, 0, width, height)
+
+    if (args.visibility.railways) {
+      // Prefer the saved export camera's complete route. Fall back to the
+      // already verified editor railway when the separate export map has not
+      // populated its vector-tile railway source yet.
+      refreshRailwayGeometry(exportMap)
+      const rails = railwayArtwork(exportMap)
+      const chosen = hasRailwayGeometry(rails) ? rails : args.railwaySnapshot
+      if (!hasRailwayGeometry(chosen)) {
+        throw new Error('The railway is not ready for export. Wait for the map to finish loading and try again.')
+      }
+      drawRailwayOnExport(output, exportMap, args.theme, chosen, logicalWidth, logicalHeight)
+    }
 
     // Composite the same deliberate road inclusions shown in the live preview.
     // Source vector roads may be completely absent from low-zoom tile styles.
@@ -1535,8 +1620,16 @@ export async function exportMapSvg(args: ExportSvgArgs) {
 
   // Add each accepted, OSM-grounded repair to the same named Illustrator road groups.
   // Use the same connected railway paths and measured dash segments as PNG.
-  const rails = railwayArtwork(map)
-  if (rails && args.visibility.railways) {
+  // Reuse the editor's already reconstructed railway if a new SVG snapshot
+  // has not received the corresponding source tiles. Never silently produce
+  // an SVG without railway artwork when the railway is enabled.
+  const reconstructedRailway = railwayArtwork(map)
+  const rails = hasRailwayGeometry(reconstructedRailway)
+    ? reconstructedRailway : args.railwaySnapshot
+  if (args.visibility.railways && !hasRailwayGeometry(rails)) {
+    throw new Error('The railway is not ready for SVG export. Wait for the map to finish loading and try again.')
+  }
+  if (hasRailwayGeometry(rails) && args.visibility.railways) {
     const style = args.theme.railwayStyle
     const width = RAILWAY_BASE_WIDTH * args.theme.railwayWidthScale * strokeScale
     const pathData = (items: RailwayArtwork['paths']) => items.features
