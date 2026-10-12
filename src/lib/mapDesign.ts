@@ -687,9 +687,14 @@ async function renderMapCanvas(args: ExportMapArgs) {
         ensureFeaturedLayers(exportMap, args.featuredPlaces, args.theme)
         ensureRoadRepairLayers(exportMap, args.repairs, args.theme, args.visibility)
         ensureRoadChoiceLayers(exportMap, args.roadChoices, null, args.theme, args.visibility)
+        const initialRailwayRevision = railwayRevision(exportMap)
         exportMap.once('idle', () => {
-          window.clearTimeout(timeout)
-          resolve()
+          // The first idle may reconstruct rails from newly arrived tiles.
+          // Wait for the derived GeoJSON to finish rendering before capturing.
+          const complete = () => { window.clearTimeout(timeout); resolve() }
+          if (railwayRevision(exportMap) > initialRailwayRevision) {
+            exportMap.once('idle', complete)
+          } else complete()
         })
       })
       exportMap.once('error', (event: any) => {
@@ -1381,7 +1386,12 @@ export async function exportMapSvg(args: ExportSvgArgs) {
           ensureFeaturedLayers(snapshot,args.featuredPlaces,args.theme)
           ensureRoadRepairLayers(snapshot,args.repairs,args.theme,args.visibility)
           ensureRoadChoiceLayers(snapshot,args.roadChoices,null,args.theme,args.visibility)
-          snapshot.once('idle',()=>{window.clearTimeout(timeout);resolve()})
+          const initialRailwayRevision = railwayRevision(snapshot)
+          snapshot.once('idle',()=>{
+            const complete=()=>{window.clearTimeout(timeout);resolve()}
+            if(railwayRevision(snapshot)>initialRailwayRevision) snapshot.once('idle',complete)
+            else complete()
+          })
         })
         snapshot.once('error',(event:any)=>{
           if(event?.error)console.warn('SVG tile warning:',event.error)
@@ -1544,7 +1554,7 @@ export async function exportMapSvg(args: ExportSvgArgs) {
         const gap = width * 1.6
         const outer = width * 0.72 + gap
         const mask = 'connected-railway-cutout'
-        railGroup.push(`<g id="connected-double-railway"><defs><mask id="${mask}" maskUnits="userSpaceOnUse" x="0" y="0" width="${widthMm * args.size.dpi / 25.4}" height="${heightMm * args.size.dpi / 25.4}"><rect x="0" y="0" width="100%" height="100%" fill="white"/><path d="${pathD}" fill="none" stroke="black" stroke-width="${gap.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/></mask></defs><path d="${pathD}" fill="none" stroke="${colour}" stroke-width="${outer.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" mask="url(#${mask})"/></g>`)
+        railGroup.push(`<g id="connected-double-railway"><defs><mask id="${mask}" maskUnits="userSpaceOnUse" x="0" y="0" width="${width}" height="${height}"><rect x="0" y="0" width="100%" height="100%" fill="white"/><path d="${pathD}" fill="none" stroke="black" stroke-width="${gap.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/></mask></defs><path d="${pathD}" fill="none" stroke="${colour}" stroke-width="${outer.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" mask="url(#${mask})"/></g>`)
       } else {
         railGroup.push(`<path id="railway-connected-route" data-name="Connected railway" d="${pathD}" fill="none" stroke="${colour}" stroke-width="${(style === 'sleepers' ? width * 0.72 : width).toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/>`)
         if (style === 'sleepers' && sleeperD) railGroup.push(`<path id="railway-connected-sleepers" d="${sleeperD}" fill="none" stroke="${colour}" stroke-width="${(width * 3.2).toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/>`)
