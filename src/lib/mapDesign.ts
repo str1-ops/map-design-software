@@ -348,8 +348,17 @@ function setLayoutSafe(map: Map, layerId: string, property: string, value: unkno
 const RAILWAY_LAYER_ID = 'strictons-railway-line'
 const RAILWAY_SLEEPER_LAYER_ID = 'strictons-railway-sleepers'
 const RAILWAY_BASE_WIDTH = 1.25
-const RAILWAY_DASH_PATTERN = [5, 3]
+// MapLibre measures line-dasharray entries in units of the line's stroke width,
+// NOT CSS pixels. Convert fixed on-screen measurements to line-width units so
+// changing thickness never stretches the rail dashes or closes their gaps.
+const RAILWAY_DASH_PX = 10
+const RAILWAY_GAP_PX = 7
 const RAILWAY_SLEEPER_PATTERN = [0.18, 1.45]
+
+function railwayDashArray(strokeWidth: number): [number, number] {
+  const width = Math.max(0.01, strokeWidth)
+  return [RAILWAY_DASH_PX / width, RAILWAY_GAP_PX / width]
+}
 const RAILWAY_CLASS_FILTER = ['match', ['get', 'class'], ['rail', 'transit'], true, false]
 
 function ensureRailwayLayers(map: Map, reference: any, theme: MapTheme, visible: boolean) {
@@ -386,11 +395,17 @@ function ensureRailwayLayers(map: Map, reference: any, theme: MapTheme, visible:
   const width = RAILWAY_BASE_WIDTH * theme.railwayWidthScale
   const isDouble = theme.railwayStyle === 'double'
   const isSleepers = theme.railwayStyle === 'sleepers'
+  const railStrokeWidth = width * (isDouble || isSleepers ? 0.72 : 1)
 
+  // Disable animated changes to the thickness and dash lengths. A thickness
+  // animation with a previously cached dash array would temporarily stretch
+  // the dashes even when the fixed-pixel calculation is correct.
+  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-width-transition', { duration: 0, delay: 0 })
+  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-dasharray-transition', { duration: 0, delay: 0 })
   setPaintSafe(map, RAILWAY_LAYER_ID, 'line-color', theme.railways)
-  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-width', width * (isDouble || isSleepers ? 0.72 : 1))
+  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-width', railStrokeWidth)
   setPaintSafe(map, RAILWAY_LAYER_ID, 'line-gap-width', isDouble ? width * 1.6 : 0)
-  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-dasharray', theme.railwayStyle === 'dashed' ? RAILWAY_DASH_PATTERN : null)
+  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-dasharray', theme.railwayStyle === 'dashed' ? railwayDashArray(railStrokeWidth) : null)
   setLayoutSafe(map, RAILWAY_LAYER_ID, 'line-cap', theme.railwayStyle === 'dashed' ? 'butt' : 'round')
   setLayoutSafe(map, RAILWAY_LAYER_ID, 'visibility', visible ? 'visible' : 'none')
 
@@ -1428,7 +1443,7 @@ export async function exportMapSvg(args: ExportSvgArgs) {
 
       if (args.theme.railwayStyle === 'dashed') {
         groups.get('Railways')!.push(
-          `<path id="${railId}" data-name="Railway" data-style="dashed" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${opacityValue}" stroke-dasharray="${(strokeWidth*RAILWAY_DASH_PATTERN[0]).toFixed(2)} ${(strokeWidth*RAILWAY_DASH_PATTERN[1]).toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/>`
+          `<path id="${railId}" data-name="Railway" data-style="dashed" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${opacityValue}" stroke-dasharray="${(RAILWAY_DASH_PX*strokeScale).toFixed(2)} ${(RAILWAY_GAP_PX*strokeScale).toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/>`
         )
       } else if (args.theme.railwayStyle === 'double') {
         const outerWidth = strokeWidth * 2.8
