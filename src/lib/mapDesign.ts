@@ -1631,7 +1631,10 @@ export async function exportMapSvg(args: ExportSvgArgs) {
   }
   if (hasRailwayGeometry(rails) && args.visibility.railways) {
     const style = args.theme.railwayStyle
-    const width = RAILWAY_BASE_WIDTH * args.theme.railwayWidthScale * strokeScale
+    // Keep railway line thickness distinct from the SVG canvas width.
+    // Using a local `width` here accidentally clipped every railway path to
+    // a 1-5 pixel-wide canvas, causing the railway to vanish on SVG export.
+    const railStrokeWidth = RAILWAY_BASE_WIDTH * args.theme.railwayWidthScale * strokeScale
     const pathData = (items: RailwayArtwork['paths']) => items.features
       .map(f => geometryPath(map, f.geometry, sx, sy, width, height))
       .filter(Boolean).join(' ')
@@ -1641,16 +1644,16 @@ export async function exportMapSvg(args: ExportSvgArgs) {
     const colour = escapeXml(args.theme.railways)
     const railGroup = groups.get('Railways')!
     if (style === 'dashed' && dashD) {
-      railGroup.push(`<path id="railway-continuous-dashes" data-name="Connected railway dashes" d="${dashD}" fill="none" stroke="${colour}" stroke-width="${width.toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/>`)
+      railGroup.push(`<path id="railway-continuous-dashes" data-name="Connected railway dashes" d="${dashD}" fill="none" stroke="${colour}" stroke-width="${railStrokeWidth.toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/>`)
     } else if (pathD) {
       if (style === 'double') {
-        const gap = width * 1.6
-        const outer = width * 0.72 + gap
+        const gap = railStrokeWidth * 1.6
+        const outer = railStrokeWidth * 0.72 + gap
         const mask = 'connected-railway-cutout'
         railGroup.push(`<g id="connected-double-railway"><defs><mask id="${mask}" maskUnits="userSpaceOnUse" x="0" y="0" width="${width}" height="${height}"><rect x="0" y="0" width="100%" height="100%" fill="white"/><path d="${pathD}" fill="none" stroke="black" stroke-width="${gap.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/></mask></defs><path d="${pathD}" fill="none" stroke="${colour}" stroke-width="${outer.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" mask="url(#${mask})"/></g>`)
       } else {
-        railGroup.push(`<path id="railway-connected-route" data-name="Connected railway" d="${pathD}" fill="none" stroke="${colour}" stroke-width="${(style === 'sleepers' ? width * 0.72 : width).toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/>`)
-        if (style === 'sleepers' && sleeperD) railGroup.push(`<path id="railway-connected-sleepers" d="${sleeperD}" fill="none" stroke="${colour}" stroke-width="${(width * 3.2).toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/>`)
+        railGroup.push(`<path id="railway-connected-route" data-name="Connected railway" d="${pathD}" fill="none" stroke="${colour}" stroke-width="${(style === 'sleepers' ? railStrokeWidth * 0.72 : railStrokeWidth).toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/>`)
+        if (style === 'sleepers' && sleeperD) railGroup.push(`<path id="railway-connected-sleepers" d="${sleeperD}" fill="none" stroke="${colour}" stroke-width="${(railStrokeWidth * 3.2).toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/>`)
       }
     }
   }
