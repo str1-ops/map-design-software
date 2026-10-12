@@ -185,7 +185,7 @@ export function stitchRailwayPaths(
  * First connect tile-split endpoints pointing in the same direction; then
  * keep the longest alignment and add only genuinely new branches.
  */
-const corridorDistance = 17 // CSS pixels at the current map zoom
+const corridorDistance = 24 // CSS pixels; merges near-parallel duplicate traces at guide scale
 const minimumBranchLength = 32
 
 function polylineLength(path: RailPoint[]) {
@@ -344,6 +344,9 @@ export function consolidateRailwayCorridors(paths: RailPoint[][]): RailPoint[][]
       const length = distance(a, b) || 1
       return corridor.nearest(p, { x: (b.x - a.x) / length, y: (b.y - a.y) / length })
     })
+    // A route which is already covered by the chosen centreline should not
+    // contribute fragments at its two ends or produce extra dash resets.
+    if (proximity.filter(point => point.near).length / sampled.length > 0.8) continue
     // Each uninterrupted section not already represented by a longer route
     // becomes a new branch. Nearby repeated traces are discarded. In
     // particular, a short side track which leaves and rejoins the same main
