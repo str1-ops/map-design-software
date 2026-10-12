@@ -344,9 +344,11 @@ export function consolidateRailwayCorridors(paths: RailPoint[][]): RailPoint[][]
       const length = distance(a, b) || 1
       return corridor.nearest(p, { x: (b.x - a.x) / length, y: (b.y - a.y) / length })
     })
-    // A route which is already covered by the chosen centreline should not
-    // contribute fragments at its two ends or produce extra dash resets.
-    if (proximity.filter(point => point.near).length / sampled.length > 0.8) continue
+    // Never discard an entire feature based on its percentage of overlap.
+    // A 1000 px source feature may overlap for 900 px but contain the last
+    // 100 px of a genuine railway at the end of the map. The uncovered parts
+    // must be tested individually, even when the route is mostly duplicate.
+    if (proximity.every(point => point.near)) continue
     // Each uninterrupted section not already represented by a longer route
     // becomes a new branch. Nearby repeated traces are discarded. In
     // particular, a short side track which leaves and rejoins the same main
@@ -360,7 +362,12 @@ export function consolidateRailwayCorridors(paths: RailPoint[][]): RailPoint[][]
       while (i < sampled.length && !proximity[i].near) i++
       const end = i
       const original = sampled.slice(start, end)
-      if (polylineLength(original) < minimumBranchLength) continue
+      // Short extensions are needed to complete routes where two source
+      // tiles end slightly apart. Suppress very small floating fragments,
+      // but never reject a genuine continuation merely because it is short.
+      const extendsExisting = (start > 0 && proximity[start - 1].near) ||
+        (end < sampled.length && proximity[end].near)
+      if (polylineLength(original) < (extendsExisting ? 6 : minimumBranchLength)) continue
       // A parallel diversion that rejoins the mainline is not a separate
       // guide-map railway. A genuine branch only attaches at one end.
       const atStart = start > 0 && proximity[start - 1].near
@@ -380,7 +387,10 @@ export function consolidateRailwayCorridors(paths: RailPoint[][]): RailPoint[][]
       corridor.add(route)
     }
   }
-  return clean
+  // Make one uninterrupted path wherever saved segments actually connect.
+  // Only join aligned endpoints; never draw an artificial railway across
+  // unrelated nearby tracks. A joined path has one dash phase.
+  return closeRailwayGaps(clean)
 }
 
 /** Split a continuous screen-space path into equally measured dash paths. */
