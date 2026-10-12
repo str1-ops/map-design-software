@@ -1,4 +1,5 @@
 import type { Map, StyleSpecification } from 'maplibre-gl'
+import { buildRailwayArtwork, railFeaturesFromSource, type RailwayArtwork } from './railwayGeometry'
 import { ensureRoadRepairLayers, type RoadRepair } from './roadRepairs'
 import { ensureRoadChoiceLayers, visibleRoadAppearance, visibleIncludedRoadParts, type RoadOverride } from './roadChoices'
 
@@ -23,6 +24,8 @@ export type MapTheme = {
   railways: string
   railwayStyle: RailwayStyle
   railwayWidthScale: number
+  railwayDashLength: number
+  railwayDashGap: number
   boundaries: string
   labels: string
   labelHalo: string
@@ -82,6 +85,8 @@ export const DEFAULT_THEME: MapTheme = {
   railways: '#8b8880',
   railwayStyle: 'solid',
   railwayWidthScale: 1,
+  railwayDashLength: 10,
+  railwayDashGap: 7,
   boundaries: '#b7b0a4',
   labels: '#282825',
   labelHalo: '#f2efe7',
@@ -341,78 +346,134 @@ function setLayoutSafe(map: Map, layerId: string, property: string, value: unkno
   }
 }
 
-// The Liberty base map contains multiple overlapping railway and hatching
-// layers (including separate bridge/tunnel layers). Dashing each independently
-// creates overlapping, mismatched patterns that can look like a solid line.
-// Render the rail network only once, with a fixed width and one dash pattern.
+// Railway geometry is derived from the source tile network, rather than
+// dashing each tile feature. See railwayGeometry.ts for route reconstruction
+// and screen-distance measured dash segmentation.
+const RAILWAY_SOURCE_ID = 'strictons-railway-routes'
+const RAILWAY_DASH_SOURCE_ID = 'strictons-railway-dash-segments'
+const RAILWAY_SLEEPER_SOURCE_ID = 'strictons-railway-sleeper-segments'
 const RAILWAY_LAYER_ID = 'strictons-railway-line'
+const RAILWAY_DASH_LAYER_ID = 'strictons-railway-dashes'
 const RAILWAY_SLEEPER_LAYER_ID = 'strictons-railway-sleepers'
 const RAILWAY_BASE_WIDTH = 1.25
-// MapLibre measures line-dasharray entries in units of the line's stroke width,
-// NOT CSS pixels. Convert fixed on-screen measurements to line-width units so
-// changing thickness never stretches the rail dashes or closes their gaps.
-const RAILWAY_DASH_PX = 10
-const RAILWAY_GAP_PX = 7
-const RAILWAY_SLEEPER_PATTERN = [0.18, 1.45]
 
-function railwayDashArray(strokeWidth: number): [number, number] {
-  const width = Math.max(0.01, strokeWidth)
-  return [RAILWAY_DASH_PX / width, RAILWAY_GAP_PX / width]
+type RailwayState = {
+  source: string
+  sourceLayer: string
+  theme: MapTheme
+  key: string
+  revision: number
+  artwork: RailwayArtwork | null
 }
-const RAILWAY_CLASS_FILTER = ['match', ['get', 'class'], ['rail', 'transit'], true, false]
+const railwayStates = new WeakMap<Map, RailwayState>()
+const emptyRailways = { type: 'FeatureCollection' as const, features: [] }
+
+function setRailwayData(map: Map, id: string, data: unknown) {
+  const source = map.getSource(id) as any
+  if (source?.setData) source.setData(data)
+}
+
+export function railwayRevision(map: Map) {
+  return railwayStates.get(map)?.revision ?? 0
+}
+
+export function railwayArtwork(map: Map) {
+  return railwayStates.get(map)?.artwork ?? null
+}
+
+// Called on idle when the source tiles have finished loading, and when the
+// camera changes. Setting derived GeoJSON itself causes another idle event,
+// so the source/camera fingerprint prevents a refresh loop.
+export function refreshRailwayGeometry(map: Map): boolean {
+  const state = railwayStates.get(map)
+  if (!state || !map.getSource(RAILWAY_SOURCE_ID)) return false
+  const pieces = railFeaturesFromSource(map, state.source, state.sourceLayer)
+  const center = map.getCenter()
+  let hash = 2166136261
+  for (const line of pieces) {
+    hash = Math.imul(hash ^ line.length, 16777619)
+    for (const point of line) {
+      hash = Math.imul(hash ^ Math.round(point.x * 16), 16777619)
+      hash = Math.imul(hash ^ Math.round(point.y * 16), 16777619)
+    }
+  }
+  const key = [
+    map.getZoom().toFixed(5), center.lng.toFixed(6), center.lat.toFixed(6),
+    map.getCanvas().clientWidth, map.getCanvas().clientHeight,
+    state.theme.railwayDashLength, state.theme.railwayDashGap,
+    pieces.length, hash,
+  ].join('|')
+  if (key === state.key) return false
+  state.key = key
+  const artwork = buildRailwayArtwork(
+    map, pieces, state.theme.railwayDashLength, state.theme.railwayDashGap,
+  )
+  state.artwork = artwork
+  state.revision++
+  setRailwayData(map, RAILWAY_SOURCE_ID, artwork.paths)
+  setRailwayData(map, RAILWAY_DASH_SOURCE_ID, artwork.dashes)
+  setRailwayData(map, RAILWAY_SLEEPER_SOURCE_ID, artwork.sleepers)
+  return true
+}
 
 function ensureRailwayLayers(map: Map, reference: any, theme: MapTheme, visible: boolean) {
   if (!reference?.source || !reference['source-layer']) return
 
+  for (const id of [RAILWAY_SOURCE_ID, RAILWAY_DASH_SOURCE_ID, RAILWAY_SLEEPER_SOURCE_ID]) {
+    if (!map.getSource(id)) {
+      map.addSource(id, { type: 'geojson', data: emptyRailways } as any)
+    }
+  }
   const style = map.getStyle() as StyleSpecification | undefined
   const firstSymbol = (style?.layers as any[] | undefined)
     ?.find((candidate) => candidate.type === 'symbol' && !candidate.id?.startsWith('strictons-'))?.id
 
-  if (!map.getLayer(RAILWAY_LAYER_ID)) {
-    map.addLayer({
-      id: RAILWAY_LAYER_ID,
-      type: 'line',
-      source: reference.source,
-      'source-layer': reference['source-layer'],
-      filter: RAILWAY_CLASS_FILTER,
-      layout: { 'line-cap': 'butt', 'line-join': 'round' },
-      paint: { 'line-color': theme.railways, 'line-width': RAILWAY_BASE_WIDTH },
-    } as any, firstSymbol)
-  }
-
-  if (!map.getLayer(RAILWAY_SLEEPER_LAYER_ID)) {
-    map.addLayer({
-      id: RAILWAY_SLEEPER_LAYER_ID,
-      type: 'line',
-      source: reference.source,
-      'source-layer': reference['source-layer'],
-      filter: RAILWAY_CLASS_FILTER,
-      layout: { visibility: 'none', 'line-cap': 'butt', 'line-join': 'round' },
-      paint: { 'line-color': theme.railways, 'line-width': RAILWAY_BASE_WIDTH * 3.2 },
-    } as any, firstSymbol)
+  for (const [id, source] of [
+    [RAILWAY_LAYER_ID, RAILWAY_SOURCE_ID],
+    [RAILWAY_DASH_LAYER_ID, RAILWAY_DASH_SOURCE_ID],
+    [RAILWAY_SLEEPER_LAYER_ID, RAILWAY_SLEEPER_SOURCE_ID],
+  ]) {
+    if (!map.getLayer(id)) {
+      map.addLayer({
+        id,
+        type: 'line',
+        source,
+        layout: { visibility: 'none', 'line-cap': 'butt', 'line-join': 'round' },
+        paint: { 'line-color': theme.railways, 'line-width': RAILWAY_BASE_WIDTH },
+      } as any, firstSymbol)
+    }
   }
 
   const width = RAILWAY_BASE_WIDTH * theme.railwayWidthScale
   const isDouble = theme.railwayStyle === 'double'
   const isSleepers = theme.railwayStyle === 'sleepers'
-  const railStrokeWidth = width * (isDouble || isSleepers ? 0.72 : 1)
-
-  // Disable animated changes to the thickness and dash lengths. A thickness
-  // animation with a previously cached dash array would temporarily stretch
-  // the dashes even when the fixed-pixel calculation is correct.
-  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-width-transition', { duration: 0, delay: 0 })
-  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-dasharray-transition', { duration: 0, delay: 0 })
-  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-color', theme.railways)
-  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-width', railStrokeWidth)
+  for (const id of [RAILWAY_LAYER_ID, RAILWAY_DASH_LAYER_ID, RAILWAY_SLEEPER_LAYER_ID]) {
+    setPaintSafe(map, id, 'line-width-transition', { duration: 0, delay: 0 })
+    setPaintSafe(map, id, 'line-color', theme.railways)
+  }
+  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-width', width * (isDouble || isSleepers ? 0.72 : 1))
   setPaintSafe(map, RAILWAY_LAYER_ID, 'line-gap-width', isDouble ? width * 1.6 : 0)
-  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-dasharray', theme.railwayStyle === 'dashed' ? railwayDashArray(railStrokeWidth) : null)
-  setLayoutSafe(map, RAILWAY_LAYER_ID, 'line-cap', theme.railwayStyle === 'dashed' ? 'butt' : 'round')
-  setLayoutSafe(map, RAILWAY_LAYER_ID, 'visibility', visible ? 'visible' : 'none')
+  setLayoutSafe(map, RAILWAY_LAYER_ID, 'line-cap', 'round')
+  setLayoutSafe(map, RAILWAY_LAYER_ID, 'visibility', visible && theme.railwayStyle !== 'dashed' ? 'visible' : 'none')
 
-  setPaintSafe(map, RAILWAY_SLEEPER_LAYER_ID, 'line-color', theme.railways)
+  // These are short, solid GeoJSON line segments cut at exact pixel distances
+  // from the continuously stitched routes. MapLibre never computes dash phase.
+  setPaintSafe(map, RAILWAY_DASH_LAYER_ID, 'line-width', width)
+  setLayoutSafe(map, RAILWAY_DASH_LAYER_ID, 'visibility', visible && theme.railwayStyle === 'dashed' ? 'visible' : 'none')
   setPaintSafe(map, RAILWAY_SLEEPER_LAYER_ID, 'line-width', width * 3.2)
-  setPaintSafe(map, RAILWAY_SLEEPER_LAYER_ID, 'line-dasharray', RAILWAY_SLEEPER_PATTERN)
   setLayoutSafe(map, RAILWAY_SLEEPER_LAYER_ID, 'visibility', visible && isSleepers ? 'visible' : 'none')
+
+  const existing = railwayStates.get(map)
+  if (!existing) {
+    railwayStates.set(map, {
+      source: reference.source, sourceLayer: reference['source-layer'],
+      theme, key: '', revision: 0, artwork: null,
+    })
+    map.on('idle', () => refreshRailwayGeometry(map))
+  } else {
+    existing.theme = theme
+  }
+  refreshRailwayGeometry(map)
 }
 
 export function applyMapDesign(map: Map, theme: MapTheme, visibility: LayerVisibility) {
@@ -1346,6 +1407,7 @@ export async function exportMapSvg(args: ExportSvgArgs) {
   const strokeScale = (sx + sy) / 2
   const widthMm = args.size.widthMm + args.size.bleedMm * 2
   const heightMm = args.size.heightMm + args.size.bleedMm * 2
+  refreshRailwayGeometry(map)
   const features = [...map.queryRenderedFeatures()].reverse() as any[]
   const roadNameCandidates = collectRoadNameCandidates(map, features)
 
@@ -1376,6 +1438,9 @@ export async function exportMapSvg(args: ExportSvgArgs) {
 
   for (const feature of features) {
     const category = featureCategory(feature)
+    // Reconstructed railways are exported from the same continuous-route
+    // geometry as the live preview, never from clipped rendered-tile features.
+    if (category === 'Railways') continue
     if (!category || !groups.has(category)) continue
     const layerId = String(feature.layer?.id || 'map-layer')
     const properties = feature.properties || {}
@@ -1437,33 +1502,7 @@ export async function exportMapSvg(args: ExportSvgArgs) {
     const opacity = Number(styleValue(map, layerId, 'paint', 'line-opacity', properties, 1))
     const strokeWidth = Math.max(0.2, (Number.isFinite(rawWidth)?rawWidth:fallbackLineWidth(category,args.theme)) * strokeScale)
 
-    if (category === 'Railways') {
-      const railId = `railway-${++objectNumber}`
-      const opacityValue = Number.isFinite(opacity) ? opacity : 1
-
-      if (args.theme.railwayStyle === 'dashed') {
-        groups.get('Railways')!.push(
-          `<path id="${railId}" data-name="Railway" data-style="dashed" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${opacityValue}" stroke-dasharray="${(RAILWAY_DASH_PX*strokeScale).toFixed(2)} ${(RAILWAY_GAP_PX*strokeScale).toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/>`
-        )
-      } else if (args.theme.railwayStyle === 'double') {
-        const outerWidth = strokeWidth * 2.8
-        const gapWidth = strokeWidth * 1.15
-        const maskId = `${railId}-mask`
-        groups.get('Railways')!.push(
-          `<g id="${railId}" data-name="Railway" data-style="double" data-layer="${escapeXml(layerId)}"><defs><mask id="${maskId}" maskUnits="userSpaceOnUse" x="0" y="0" width="${width}" height="${height}"><rect x="0" y="0" width="${width}" height="${height}" fill="white"/><path d="${d}" fill="none" stroke="black" stroke-width="${gapWidth.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/></mask></defs><path d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${outerWidth.toFixed(2)}" stroke-opacity="${opacityValue}" stroke-linecap="round" stroke-linejoin="round" mask="url(#${maskId})"/></g>`
-        )
-      } else if (args.theme.railwayStyle === 'sleepers') {
-        const railWidth = Math.max(0.2, strokeWidth * 0.72)
-        const sleeperWidth = Math.max(0.6, strokeWidth * 3.2)
-        groups.get('Railways')!.push(
-          `<g id="${railId}" data-name="Railway" data-style="sleepers" data-layer="${escapeXml(layerId)}"><path data-name="Rail" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${railWidth.toFixed(2)}" stroke-opacity="${opacityValue}" stroke-linecap="round" stroke-linejoin="round"/><path data-name="Sleepers" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${sleeperWidth.toFixed(2)}" stroke-opacity="${opacityValue}" stroke-dasharray="${(sleeperWidth*0.18).toFixed(2)} ${(sleeperWidth*1.45).toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/></g>`
-        )
-      } else {
-        groups.get('Railways')!.push(
-          `<path id="${railId}" data-name="Railway" data-style="solid" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${opacityValue}" stroke-linecap="round" stroke-linejoin="round"/>`
-        )
-      }
-    } else if (roadCategories.has(category)) {
+    if (roadCategories.has(category)) {
       const namedProperties = matchRoadName(map, feature, roadNameCandidates)
       const identity = roadIdentity(properties, feature, layerId, namedProperties)
       const categoryRoads = namedRoadGroups.get(category)!
@@ -1485,6 +1524,34 @@ export async function exportMapSvg(args: ExportSvgArgs) {
   }
 
   // Add each accepted, OSM-grounded repair to the same named Illustrator road groups.
+  // Use the same connected railway paths and measured dash segments as PNG.
+  const rails = railwayArtwork(map)
+  if (rails && args.visibility.railways) {
+    const style = args.theme.railwayStyle
+    const width = RAILWAY_BASE_WIDTH * args.theme.railwayWidthScale * strokeScale
+    const pathData = (items: RailwayArtwork['paths']) => items.features
+      .map(f => geometryPath(map, f.geometry, sx, sy, width, height))
+      .filter(Boolean).join(' ')
+    const pathD = pathData(rails.paths)
+    const dashD = pathData(rails.dashes)
+    const sleeperD = pathData(rails.sleepers)
+    const colour = escapeXml(args.theme.railways)
+    const railGroup = groups.get('Railways')!
+    if (style === 'dashed' && dashD) {
+      railGroup.push(`<path id="railway-continuous-dashes" data-name="Connected railway dashes" d="${dashD}" fill="none" stroke="${colour}" stroke-width="${width.toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/>`)
+    } else if (pathD) {
+      if (style === 'double') {
+        const gap = width * 1.6
+        const outer = width * 0.72 + gap
+        const mask = 'connected-railway-cutout'
+        railGroup.push(`<g id="connected-double-railway"><defs><mask id="${mask}" maskUnits="userSpaceOnUse" x="0" y="0" width="${widthMm * args.size.dpi / 25.4}" height="${heightMm * args.size.dpi / 25.4}"><rect x="0" y="0" width="100%" height="100%" fill="white"/><path d="${pathD}" fill="none" stroke="black" stroke-width="${gap.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/></mask></defs><path d="${pathD}" fill="none" stroke="${colour}" stroke-width="${outer.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" mask="url(#${mask})"/></g>`)
+      } else {
+        railGroup.push(`<path id="railway-connected-route" data-name="Connected railway" d="${pathD}" fill="none" stroke="${colour}" stroke-width="${(style === 'sleepers' ? width * 0.72 : width).toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/>`)
+        if (style === 'sleepers' && sleeperD) railGroup.push(`<path id="railway-connected-sleepers" d="${sleeperD}" fill="none" stroke="${colour}" stroke-width="${(width * 3.2).toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/>`)
+      }
+    }
+  }
+
   // The map layer is excluded from queryRenderedFeatures, avoiding double export.
   for (const repair of args.repairs) {
     const geometry={type:'LineString',coordinates:repair.coordinates}
