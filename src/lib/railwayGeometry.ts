@@ -206,7 +206,8 @@ function closeRailwayGaps(paths: RailPoint[][]): RailPoint[][] {
     .map(path => [...path])
   // Join only endpoints whose continuations point the same way. Joining two
   // neighbouring parallel rails at their ends would create a spurious loop.
-  for (let iteration = 0; iteration < routes.length; iteration++) {
+  const maximumJoins = routes.length - 1
+  for (let iteration = 0; iteration < maximumJoins; iteration++) {
     let best: { i: number; j: number; flipA: boolean; flipB: boolean; score: number } | null = null
     for (let i = 0; i < routes.length; i++) for (let j = i + 1; j < routes.length; j++) {
       const one = routes[i], two = routes[j]
