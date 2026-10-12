@@ -178,6 +178,179 @@ export function stitchRailwayPaths(
   return routes
 }
 
+
+/**
+ * Editorial maps depict a railway corridor as ONE centreline, not every
+ * overlapping vector-tile trace or neighbouring track of a double track.
+ * First connect tile-split endpoints pointing in the same direction; then
+ * keep the longest alignment and add only genuinely new branches.
+ */
+const corridorDistance = 17 // CSS pixels at the current map zoom
+const minimumBranchLength = 32
+
+function polylineLength(path: RailPoint[]) {
+  let length = 0
+  for (let i = 1; i < path.length; i++) length += distance(path[i - 1], path[i])
+  return length
+}
+
+function routeHeading(route: RailPoint[], atEnd: boolean): RailPoint {
+  const a = atEnd ? route[route.length - 2] : route[0]
+  const b = atEnd ? route[route.length - 1] : route[1]
+  const length = distance(a, b) || 1
+  return { x: (b.x - a.x) / length, y: (b.y - a.y) / length }
+}
+
+function closeRailwayGaps(paths: RailPoint[][]): RailPoint[][] {
+  const routes = paths.filter(path => path.length > 1 && polylineLength(path) >= 2)
+    .map(path => [...path])
+  // Join only endpoints whose continuations point the same way. Joining two
+  // neighbouring parallel rails at their ends would create a spurious loop.
+  for (let iteration = 0; iteration < routes.length; iteration++) {
+    let best: { i: number; j: number; flipA: boolean; flipB: boolean; score: number } | null = null
+    for (let i = 0; i < routes.length; i++) for (let j = i + 1; j < routes.length; j++) {
+      const one = routes[i], two = routes[j]
+      for (const flipA of [false, true]) for (const flipB of [false, true]) {
+        const end = flipA ? one[0] : one[one.length - 1]
+        const start = flipB ? two[two.length - 1] : two[0]
+        const span = distance(end, start)
+        if (span > 19) continue
+        const ha = routeHeading(one, !flipA)
+        const hb = routeHeading(two, flipB)
+        const av = flipA ? { x: -ha.x, y: -ha.y } : ha
+        const bv = flipB ? { x: -hb.x, y: -hb.y } : hb
+        const parallel = av.x * bv.x + av.y * bv.y
+        if (parallel < 0.78) continue
+        // When there is a visible gap, the continuation must point towards
+        // it rather than connecting two ends of side-by-side railways.
+        const forward = span < 1 ? 1 :
+          (av.x * (start.x - end.x) + av.y * (start.y - end.y)) / span
+        const arrives = span < 1 ? 1 :
+          (bv.x * (start.x - end.x) + bv.y * (start.y - end.y)) / span
+        if (span > 2 && (forward < 0.38 || arrives < 0.38)) continue
+        const score = span + (1 - parallel) * 16
+        if (!best || score < best.score) best = { i, j, flipA, flipB, score }
+      }
+    }
+    if (!best) break
+    const first = best.flipA ? [...routes[best.i]].reverse() : routes[best.i]
+    const second = best.flipB ? [...routes[best.j]].reverse() : routes[best.j]
+    routes[best.i] = [...first, ...second.slice(distance(first[first.length - 1], second[0]) < 0.2 ? 1 : 0)]
+    routes.splice(best.j, 1)
+  }
+  return routes
+}
+
+type Proximity = { near: boolean; x: number; y: number }
+type IndexedSegment = { a: RailPoint; b: RailPoint; tx: number; ty: number }
+
+function railwayReference() {
+  const grid = new globalThis.Map<string, IndexedSegment[]>()
+  const cell = 32
+  const key = (x: number, y: number) => `${x}:${y}`
+  const add = (route: RailPoint[]) => {
+    for (let i = 1; i < route.length; i++) {
+      const a = route[i - 1], b = route[i]
+      const length = distance(a, b)
+      if (length < 0.01) continue
+      const segment: IndexedSegment = { a, b,
+        tx: (b.x - a.x) / length, ty: (b.y - a.y) / length }
+      const left = Math.floor((Math.min(a.x, b.x) - corridorDistance) / cell)
+      const right = Math.floor((Math.max(a.x, b.x) + corridorDistance) / cell)
+      const top = Math.floor((Math.min(a.y, b.y) - corridorDistance) / cell)
+      const bottom = Math.floor((Math.max(a.y, b.y) + corridorDistance) / cell)
+      for (let x = left; x <= right; x++) for (let y = top; y <= bottom; y++) {
+        const id = key(x, y)
+        const items = grid.get(id) || []
+        items.push(segment)
+        grid.set(id, items)
+      }
+    }
+  }
+  const nearest = (p: RailPoint, tangent: RailPoint): Proximity => {
+    const x = Math.floor(p.x / cell), y = Math.floor(p.y / cell)
+    const candidates = grid.get(key(x, y)) || []
+    let best = corridorDistance
+    let result: Proximity = { near: false, x: p.x, y: p.y }
+    for (const s of candidates) {
+      const parallel = Math.abs(s.tx * tangent.x + s.ty * tangent.y)
+      if (parallel < 0.72) continue
+      const dx = s.b.x - s.a.x, dy = s.b.y - s.a.y
+      const t = Math.max(0, Math.min(1, ((p.x - s.a.x) * dx + (p.y - s.a.y) * dy) / (dx * dx + dy * dy)))
+      const px = s.a.x + t * dx, py = s.a.y + t * dy
+      const delta = Math.hypot(p.x - px, p.y - py)
+      if (delta <= best) { best = delta; result = { near: true, x: px, y: py } }
+    }
+    return result
+  }
+  return { add, nearest }
+}
+
+function sampleRailway(route: RailPoint[], spacing = 5) {
+  const samples: RailPoint[] = []
+  for (let i = 1; i < route.length; i++) {
+    const a = route[i - 1], b = route[i]
+    const length = distance(a, b)
+    const steps = Math.max(1, Math.ceil(length / spacing))
+    for (let j = 0; j < steps; j++) {
+      const t = j / steps
+      samples.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t })
+    }
+  }
+  if (route.length) samples.push(route[route.length - 1])
+  return samples
+}
+
+export function consolidateRailwayCorridors(paths: RailPoint[][]): RailPoint[][] {
+  const connected = closeRailwayGaps(paths)
+    .sort((a, b) => polylineLength(b) - polylineLength(a))
+  const corridor = railwayReference()
+  const clean: RailPoint[][] = []
+  for (const candidate of connected) {
+    const sampled = sampleRailway(candidate)
+    if (sampled.length < 2) continue
+    const proximity = sampled.map((p, i) => {
+      const a = sampled[Math.max(0, i - 1)]
+      const b = sampled[Math.min(sampled.length - 1, i + 1)]
+      const length = distance(a, b) || 1
+      return corridor.nearest(p, { x: (b.x - a.x) / length, y: (b.y - a.y) / length })
+    })
+    // Each uninterrupted section not already represented by a longer route
+    // becomes a new branch. Nearby repeated traces are discarded. In
+    // particular, a short side track which leaves and rejoins the same main
+    // corridor is not drawn as a second copy of the railway.
+    const branches: RailPoint[][] = []
+    let i = 0
+    while (i < sampled.length) {
+      while (i < sampled.length && proximity[i].near) i++
+      if (i >= sampled.length) break
+      const start = i
+      while (i < sampled.length && !proximity[i].near) i++
+      const end = i
+      const original = sampled.slice(start, end)
+      if (polylineLength(original) < minimumBranchLength) continue
+      // A parallel diversion that rejoins the mainline is not a separate
+      // guide-map railway. A genuine branch only attaches at one end.
+      const atStart = start > 0 && proximity[start - 1].near
+      const atEnd = end < sampled.length && proximity[end].near
+      if (atStart && atEnd) continue
+      const branch: RailPoint[] = []
+      if (atStart) branch.push({ x: proximity[start - 1].x, y: proximity[start - 1].y })
+      branch.push(...original)
+      if (atEnd) branch.push({ x: proximity[end].x, y: proximity[end].y })
+      if (branch.length > 1) branches.push(branch)
+    }
+    // No accepted centreline exists yet: the entire first and longest route
+    // forms the corridor, with its original accurate vertices intact.
+    if (!clean.length && !branches.length) branches.push(candidate)
+    for (const route of branches) {
+      clean.push(route)
+      corridor.add(route)
+    }
+  }
+  return clean
+}
+
 /** Split a continuous screen-space path into equally measured dash paths. */
 export function segmentRailwayDashes(
   routes: RailPoint[][],
@@ -246,7 +419,7 @@ export function railFeaturesFromSource(map: Map, source: string, sourceLayer: st
 }
 
 export function buildRailwayArtwork(map: Map, lines: RailPoint[][], dash: number, gap: number): RailwayArtwork {
-  const routes = stitchRailwayPaths(lines)
+  const routes = consolidateRailwayCorridors(stitchRailwayPaths(lines))
   const toGeo = (items: RailPoint[][]) => asCollection(items.map(points => points.map(p => {
     const ll = map.unproject([p.x, p.y])
     return [ll.lng, ll.lat] as RailCoordinate
