@@ -341,96 +341,82 @@ function setLayoutSafe(map: Map, layerId: string, property: string, value: unkno
   }
 }
 
-function railwayOverlayId(layerId: string) {
-  return `strictons-rail-sleepers-${layerId}`
-}
+// The Liberty base map contains multiple overlapping railway and hatching
+// layers (including separate bridge/tunnel layers). Dashing each independently
+// creates overlapping, mismatched patterns that can look like a solid line.
+// Render the rail network only once, with a fixed width and one dash pattern.
+const RAILWAY_LAYER_ID = 'strictons-railway-line'
+const RAILWAY_SLEEPER_LAYER_ID = 'strictons-railway-sleepers'
+const RAILWAY_BASE_WIDTH = 1.25
+const RAILWAY_DASH_PATTERN = [5, 3]
+const RAILWAY_SLEEPER_PATTERN = [0.18, 1.45]
+const RAILWAY_CLASS_FILTER = ['match', ['get', 'class'], ['rail', 'transit'], true, false]
 
-function ensureRailwaySleeperOverlay(map: Map, layer: any, theme: MapTheme, visible: boolean) {
-  const source = layer.source
-  const sourceLayer = layer['source-layer']
-  if (!source || !sourceLayer) return
+function ensureRailwayLayers(map: Map, reference: any, theme: MapTheme, visible: boolean) {
+  if (!reference?.source || !reference['source-layer']) return
 
-  const overlayId = railwayOverlayId(layer.id)
-  if (!map.getLayer(overlayId)) {
-    const style = map.getStyle() as StyleSpecification | undefined
-    const firstSymbol = (style?.layers as any[] | undefined)?.find((candidate) => candidate.type === 'symbol' && !candidate.id?.startsWith('strictons-'))?.id
+  const style = map.getStyle() as StyleSpecification | undefined
+  const firstSymbol = (style?.layers as any[] | undefined)
+    ?.find((candidate) => candidate.type === 'symbol' && !candidate.id?.startsWith('strictons-'))?.id
 
-    try {
-      map.addLayer({
-        id: overlayId,
-        type: 'line',
-        source,
-        'source-layer': sourceLayer,
-        minzoom: layer.minzoom,
-        maxzoom: layer.maxzoom,
-        filter: layer.filter,
-        layout: {
-          visibility: 'none',
-          'line-cap': 'butt',
-          'line-join': 'round',
-        },
-        paint: {
-          'line-color': theme.railways,
-          'line-width': 3,
-          'line-dasharray': [0.18, 1.45],
-        },
-      } as any, firstSymbol)
-    } catch {
-      return
-    }
+  if (!map.getLayer(RAILWAY_LAYER_ID)) {
+    map.addLayer({
+      id: RAILWAY_LAYER_ID,
+      type: 'line',
+      source: reference.source,
+      'source-layer': reference['source-layer'],
+      filter: RAILWAY_CLASS_FILTER,
+      layout: { 'line-cap': 'butt', 'line-join': 'round' },
+      paint: { 'line-color': theme.railways, 'line-width': RAILWAY_BASE_WIDTH },
+    } as any, firstSymbol)
   }
 
-  const baseWidth = getOriginalLineWidth(map, layer.id)
-  const sleeperWidth = scaledLineWidth(baseWidth, theme.railwayWidthScale * 3.2)
-  setPaintSafe(map, overlayId, 'line-color', theme.railways)
-  if (sleeperWidth !== undefined) setPaintSafe(map, overlayId, 'line-width', sleeperWidth)
-  setPaintSafe(map, overlayId, 'line-dasharray', [0.18, 1.45])
-  setLayoutSafe(map, overlayId, 'visibility', visible && theme.railwayStyle === 'sleepers' ? 'visible' : 'none')
-}
-
-function styleRailwayLayer(map: Map, layer: any, theme: MapTheme, visible: boolean) {
-  const id = layer.id
-  const baseWidth = getOriginalLineWidth(map, id)
-  const normalWidth = scaledLineWidth(baseWidth, theme.railwayWidthScale)
-
-  setPaintSafe(map, id, 'line-color', theme.railways)
-  setLayoutSafe(map, id, 'line-join', 'round')
-
-  if (theme.railwayStyle === 'dashed') {
-    if (normalWidth !== undefined) setPaintSafe(map, id, 'line-width', normalWidth)
-    setPaintSafe(map, id, 'line-gap-width', 0)
-    setPaintSafe(map, id, 'line-dasharray', [3.2, 2.2])
-    setLayoutSafe(map, id, 'line-cap', 'butt')
-  } else if (theme.railwayStyle === 'double') {
-    const railWidth = scaledLineWidth(baseWidth, theme.railwayWidthScale * 0.72)
-    const gapWidth = scaledLineWidth(baseWidth, theme.railwayWidthScale * 1.6)
-    if (railWidth !== undefined) setPaintSafe(map, id, 'line-width', railWidth)
-    if (gapWidth !== undefined) setPaintSafe(map, id, 'line-gap-width', gapWidth)
-    setPaintSafe(map, id, 'line-dasharray', null)
-    setLayoutSafe(map, id, 'line-cap', 'round')
-  } else if (theme.railwayStyle === 'sleepers') {
-    const railWidth = scaledLineWidth(baseWidth, theme.railwayWidthScale * 0.72)
-    if (railWidth !== undefined) setPaintSafe(map, id, 'line-width', railWidth)
-    setPaintSafe(map, id, 'line-gap-width', 0)
-    setPaintSafe(map, id, 'line-dasharray', null)
-    setLayoutSafe(map, id, 'line-cap', 'round')
-  } else {
-    if (normalWidth !== undefined) setPaintSafe(map, id, 'line-width', normalWidth)
-    setPaintSafe(map, id, 'line-gap-width', 0)
-    setPaintSafe(map, id, 'line-dasharray', null)
-    setLayoutSafe(map, id, 'line-cap', 'round')
+  if (!map.getLayer(RAILWAY_SLEEPER_LAYER_ID)) {
+    map.addLayer({
+      id: RAILWAY_SLEEPER_LAYER_ID,
+      type: 'line',
+      source: reference.source,
+      'source-layer': reference['source-layer'],
+      filter: RAILWAY_CLASS_FILTER,
+      layout: { visibility: 'none', 'line-cap': 'butt', 'line-join': 'round' },
+      paint: { 'line-color': theme.railways, 'line-width': RAILWAY_BASE_WIDTH * 3.2 },
+    } as any, firstSymbol)
   }
 
-  ensureRailwaySleeperOverlay(map, layer, theme, visible)
+  const width = RAILWAY_BASE_WIDTH * theme.railwayWidthScale
+  const isDouble = theme.railwayStyle === 'double'
+  const isSleepers = theme.railwayStyle === 'sleepers'
+
+  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-color', theme.railways)
+  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-width', width * (isDouble || isSleepers ? 0.72 : 1))
+  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-gap-width', isDouble ? width * 1.6 : 0)
+  setPaintSafe(map, RAILWAY_LAYER_ID, 'line-dasharray', theme.railwayStyle === 'dashed' ? RAILWAY_DASH_PATTERN : null)
+  setLayoutSafe(map, RAILWAY_LAYER_ID, 'line-cap', theme.railwayStyle === 'dashed' ? 'butt' : 'round')
+  setLayoutSafe(map, RAILWAY_LAYER_ID, 'visibility', visible ? 'visible' : 'none')
+
+  setPaintSafe(map, RAILWAY_SLEEPER_LAYER_ID, 'line-color', theme.railways)
+  setPaintSafe(map, RAILWAY_SLEEPER_LAYER_ID, 'line-width', width * 3.2)
+  setPaintSafe(map, RAILWAY_SLEEPER_LAYER_ID, 'line-dasharray', RAILWAY_SLEEPER_PATTERN)
+  setLayoutSafe(map, RAILWAY_SLEEPER_LAYER_ID, 'visibility', visible && isSleepers ? 'visible' : 'none')
 }
 
 export function applyMapDesign(map: Map, theme: MapTheme, visibility: LayerVisibility) {
   const style = map.getStyle() as StyleSpecification | undefined
   if (!style?.layers) return
 
+  const baseRailway = (style.layers as any[]).find((layer) =>
+    isRailway(layer) && layer.source && layer['source-layer']
+  )
+
   for (const layer of style.layers as any[]) {
     const id = layer.id
     if (!id || id.startsWith('strictons-')) continue
+    if (isRailway(layer)) {
+      // Disable both the base rail strokes and their hatching companions.
+      // Otherwise their differing widths and dash phases stack on top.
+      setLayoutSafe(map, id, 'visibility', 'none')
+      continue
+    }
 
     const requestedVisibility = visibilityForLayer(layer, visibility)
     setLayoutSafe(map, id, 'visibility', requestedVisibility ?? 'visible')
@@ -447,9 +433,7 @@ export function applyMapDesign(map: Map, theme: MapTheme, visibility: LayerVisib
     }
 
     if (layer.type === 'line') {
-      if (isRailway(layer)) {
-        styleRailwayLayer(map, layer, theme, visibility.railways)
-      } else if (isBoundary(layer)) {
+      if (isBoundary(layer)) {
         setPaintSafe(map, id, 'line-color', theme.boundaries)
       } else if (isRoad(layer)) {
         // Style each road feature by its actual OpenMapTiles class rather than
@@ -469,6 +453,8 @@ export function applyMapDesign(map: Map, theme: MapTheme, visibility: LayerVisib
       setPaintSafe(map, id, 'text-halo-color', theme.labelHalo)
     }
   }
+
+  ensureRailwayLayers(map, baseRailway, theme, visibility.railways)
 }
 
 function featuredGeoJson(places: FeaturedPlace[]) {
@@ -1233,6 +1219,9 @@ function featureCategory(feature: any) {
   const sourceLayer = String(feature.sourceLayer || layer['source-layer'] || '').toLowerCase()
   const roadClass = String(props.class || '').toLowerCase()
 
+  // Export the single designed railway line, not the hidden original rails
+  // or the separate sleeper overlay (which is exported from the base path).
+  if (layer.id === RAILWAY_LAYER_ID) return 'Railways'
   if (String(layer.id || '').startsWith('strictons-')) return null
   if (layer.type === 'symbol') return 'Labels'
   if (sourceLayer === 'building' || /building/.test(fingerprint)) return 'Buildings'
@@ -1439,7 +1428,7 @@ export async function exportMapSvg(args: ExportSvgArgs) {
 
       if (args.theme.railwayStyle === 'dashed') {
         groups.get('Railways')!.push(
-          `<path id="${railId}" data-name="Railway" data-style="dashed" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${opacityValue}" stroke-dasharray="${(strokeWidth*3.2).toFixed(2)} ${(strokeWidth*2.2).toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/>`
+          `<path id="${railId}" data-name="Railway" data-style="dashed" data-layer="${escapeXml(layerId)}" d="${d}" fill="none" stroke="${escapeXml(colour)}" stroke-width="${strokeWidth.toFixed(2)}" stroke-opacity="${opacityValue}" stroke-dasharray="${(strokeWidth*RAILWAY_DASH_PATTERN[0]).toFixed(2)} ${(strokeWidth*RAILWAY_DASH_PATTERN[1]).toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round"/>`
         )
       } else if (args.theme.railwayStyle === 'double') {
         const outerWidth = strokeWidth * 2.8
