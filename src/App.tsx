@@ -36,6 +36,18 @@ function load():Project {
 }
 function fileName(s:string){ return s.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || 'map' }
 
+// Google Maps copies decimal latitude first, followed by longitude.
+// Allow optional parentheses and common Unicode minus signs from pasted text.
+function parseGoogleCoordinates(value:string):{lat:number;lng:number}|null {
+  const normalized=value.trim().replace(/[−﹣－]/g,'-')
+  const match=normalized.match(/^\(?\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*[,，]\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*\)?$/)
+  if(!match)return null
+  const lat=Number(match[1]),lng=Number(match[2])
+  if(!Number.isFinite(lat)||!Number.isFinite(lng)||lat < -90||lat > 90||lng < -180||lng > 180)return null
+  return {lat,lng}
+}
+
+
 function Toggle({label,value,onChange}:{label:string;value:boolean;onChange:(v:boolean)=>void}){
   return <label className="toggle"><span>{label}</span><input type="checkbox" checked={value} onChange={e=>onChange(e.target.checked)}/><i/></label>
 }
@@ -241,6 +253,7 @@ export default function App(){
   const [repairStatus,setRepairStatus]=useState('')
   const [project,setProject]=useState<Project>(()=>load()), [tab,setTab]=useState<'document'|'style'|'places'>('document'), [pick,setPick]=useState(false)
   const [query,setQuery]=useState(''),[results,setResults]=useState<SearchResult[]>([]),[busy,setBusy]=useState(false),[note,setNote]=useState(''),[viewport,setViewport]=useState({width:0,height:0})
+  const [coordinateInput,setCoordinateInput]=useState(''),[coordinateError,setCoordinateError]=useState('')
   const px=useMemo(()=>totalPrintPixels(project.size),[project.size]), ratio=(project.size.widthMm+project.size.bleedMm*2)/(project.size.heightMm+project.size.bleedMm*2)
   useEffect(()=>localStorage.setItem(STORE,JSON.stringify(project)),[project])
   useEffect(()=>{if(!note)return;const t=setTimeout(()=>setNote(''),2400);return()=>clearTimeout(t)},[note])
@@ -251,6 +264,32 @@ export default function App(){
   const search=async(e:FormEvent)=>{e.preventDefault();if(!query.trim())return;setBusy(true);try{const r=await geocode(query.trim());setResults(r);if(!r.length)setNote('No places found')}catch(err){setNote(err instanceof Error?err.message:'Search failed')}finally{setBusy(false)}}
   const go=(r:SearchResult)=>{if(locked){setNote('Unlock canvas before changing location.');return}patch('camera',{...project.camera,center:[Number(r.lon),Number(r.lat)],zoom:r.type==='city'||r.type==='town'?12:14});setResults([])}
   const add=(p:FeaturedPlace)=>{patch('places',[...project.places,p]);setPick(false);setTab('places')}
+  const addCoordinateMarker=(event:FormEvent)=>{
+    event.preventDefault()
+    const parsed=parseGoogleCoordinates(coordinateInput)
+    if(!parsed){
+      setCoordinateError('Enter latitude, longitude from Google Maps, e.g. -33.263, 151.544.')
+      return
+    }
+    if(project.places.some(p=>p.markerOnly===true && Math.abs(p.lat-parsed.lat)<1e-9 && Math.abs(p.lng-parsed.lng)<1e-9)){
+      setCoordinateError('A marker already exists at these coordinates.')
+      return
+    }
+    let number=1
+    while(project.places.some(p=>p.name==='Marker '+number))number++
+    const place:FeaturedPlace={
+      id:crypto.randomUUID(),name:'Marker '+number,category:'Coordinate',
+      lat:parsed.lat,lng:parsed.lng,markerOnly:true
+    }
+    setProject(p=>({...p,places:[...p.places,place]}))
+    setCoordinateInput('')
+    setCoordinateError('')
+    const map=liveMapRef.current
+    const pos=map?.project([parsed.lng,parsed.lat])
+    const canvas=map?.getCanvas()
+    const outside=!!(pos&&canvas&&(pos.x<0||pos.y<0||pos.x>canvas.clientWidth||pos.y>canvas.clientHeight))
+    setNote(outside?'Marker saved. It is outside the current map view.':'Coordinate marker added.')
+  }
   const lockCanvas=()=>{
     const map=liveMapRef.current
     // Commit any new print view before entering locked inspection mode.
@@ -385,8 +424,16 @@ export default function App(){
         <h3>Base detail <em>what appears</em></h3>{([['Road network','roads'],['Minor roads & paths','minorRoads'],['Rail network','railways'],['Buildings','buildings'],['Parks & land use','parks'],['Boundaries','boundaries'],['All base labels','labels'],['Suburbs & towns','placeLabels'],['Road names','roadLabels'],['OSM POIs','poiLabels'],['Water names','waterLabels']] as [string,keyof LayerVisibility][]).map(([l,k])=><Toggle key={k} label={l} value={project.visible[k]} onChange={v=>visible(k,v)}/>)}
       </>}
       {tab==='places'&&<>
+        <h3>Coordinate markers <em>{project.places.filter(p=>p.markerOnly===true).length} saved</em></h3>
+        <p className="help">Paste coordinates copied from Google Maps, latitude first. Each coordinate adds a small dot without a label.</p>
+        <form className="coordinate-form" onSubmit={addCoordinateMarker}>
+          <input aria-label="Google Maps latitude and longitude" value={coordinateInput} onChange={e=>{setCoordinateInput(e.target.value);if(coordinateError)setCoordinateError('')}} placeholder="-33.263, 151.544" spellCheck={false}/>
+          <button type="submit" aria-label="Add coordinate marker" title="Add marker">＋</button>
+        </form>
+        {coordinateError&&<p className="coordinate-error" role="alert">{coordinateError}</p>}
+        <div className="repair-list coordinate-list">{project.places.filter(p=>p.markerOnly===true).map((p,i)=><article key={p.id}><span>{String(i+1).padStart(2,'0')}</span><div><b>{p.name}</b><small>{p.lat}, {p.lng}</small></div><button type="button" aria-label={'Remove '+p.name} onClick={()=>patch('places',project.places.filter(x=>x.id!==p.id))}>×</button></article>)}</div>
         <h3>Featured places <em>editorial layer</em></h3><button className={pick?'primary':'wide'} onClick={()=>setPick(v=>!v)}>＋ {pick?'Click the map…':'Add place from map'}</button><p className="help">Capture a map point, then rename it exactly as it should appear in the guide.</p>
-        <div className="places">{project.places.map((p,i)=><article key={p.id}><span>{String(i+1).padStart(2,'0')}</span><div><input value={p.name} onChange={e=>patch('places',project.places.map(x=>x.id===p.id?{...x,name:e.target.value}:x))}/><input className="sub" value={p.category} onChange={e=>patch('places',project.places.map(x=>x.id===p.id?{...x,category:e.target.value}:x))}/></div><button onClick={()=>patch('places',project.places.filter(x=>x.id!==p.id))}>×</button></article>)}</div>
+        <div className="places">{project.places.filter(p=>p.markerOnly!==true).map((p,i)=><article key={p.id}><span>{String(i+1).padStart(2,'0')}</span><div><input value={p.name} onChange={e=>patch('places',project.places.map(x=>x.id===p.id?{...x,name:e.target.value}:x))}/><input className="sub" value={p.category} onChange={e=>patch('places',project.places.map(x=>x.id===p.id?{...x,category:e.target.value}:x))}/></div><button onClick={()=>patch('places',project.places.filter(x=>x.id!==p.id))}>×</button></article>)}</div>
         <h3>Featured labels <em>print emphasis</em></h3><label className="range">Size <b>{project.theme.featuredLabelSize}px</b><input type="range" min="10" max="28" value={project.theme.featuredLabelSize} onChange={e=>theme('featuredLabelSize',+e.target.value)}/></label><Colour label="Text" value={project.theme.featuredText} onChange={v=>theme('featuredText',v)}/><Colour label="Halo" value={project.theme.featuredHalo} onChange={v=>theme('featuredHalo',v)}/>
       </>}
       </div>
