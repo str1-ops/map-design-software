@@ -55,6 +55,8 @@ export type FeaturedPlace = {
   lng: number
   lat: number
   category: string
+  // A coordinate marker is an unlabelled small dot, unlike a featured place.
+  markerOnly?: boolean
 }
 
 export type CameraState = {
@@ -539,7 +541,7 @@ function featuredGeoJson(places: FeaturedPlace[]) {
     features: places.map((place) => ({
       type: 'Feature' as const,
       geometry: { type: 'Point' as const, coordinates: [place.lng, place.lat] },
-      properties: { id: place.id, name: place.name, category: place.category },
+      properties: { id: place.id, name: place.name, category: place.category, markerOnly: place.markerOnly === true },
     })),
   }
 }
@@ -560,9 +562,9 @@ export function ensureFeaturedLayers(map: Map, places: FeaturedPlace[], theme: M
       type: 'circle',
       source: FEATURED_SOURCE_ID,
       paint: {
-        'circle-radius': 5,
+        'circle-radius': ['case', ['==', ['get', 'markerOnly'], true], 3.5, 5],
         'circle-color': theme.featured,
-        'circle-stroke-width': 2,
+        'circle-stroke-width': ['case', ['==', ['get', 'markerOnly'], true], 1.25, 2],
         'circle-stroke-color': theme.featuredHalo,
       },
     })
@@ -573,6 +575,7 @@ export function ensureFeaturedLayers(map: Map, places: FeaturedPlace[], theme: M
       id: FEATURED_LABEL_LAYER_ID,
       type: 'symbol',
       source: FEATURED_SOURCE_ID,
+      filter: ['!=', ['get', 'markerOnly'], true],
       layout: {
         'text-field': ['get', 'name'],
         'text-size': theme.featuredLabelSize,
@@ -1705,12 +1708,13 @@ export async function exportMapSvg(args: ExportSvgArgs) {
 
   for (const place of args.featuredPlaces) {
     const point = projectCoordinate(map, [place.lng, place.lat], sx, sy)
-    const markerRadius = Math.max(2, 5 * strokeScale)
+    const smallMarker = place.markerOnly === true
+    const markerRadius = Math.max(2, (smallMarker ? 3.5 : 5) * strokeScale)
     if (point.x - markerRadius < 0 || point.x + markerRadius > width || point.y - markerRadius < 0 || point.y + markerRadius > height) continue
     groups.get('Featured Markers')!.push(
-      `<circle id="featured-marker-${++objectNumber}" data-name="${escapeXml(place.name)}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="${markerRadius.toFixed(2)}" fill="${escapeXml(args.theme.featured)}" stroke="${escapeXml(args.theme.featuredHalo)}" stroke-width="${Math.max(1,2*strokeScale).toFixed(2)}"/>`
+      `<circle id="featured-marker-${++objectNumber}" data-name="${escapeXml(place.name)}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="${markerRadius.toFixed(2)}" fill="${escapeXml(args.theme.featured)}" stroke="${escapeXml(args.theme.featuredHalo)}" stroke-width="${Math.max(0.5,(smallMarker ? 1.25 : 2)*strokeScale).toFixed(2)}"/>`
     )
-    groups.get('Featured Labels')!.push(
+    if (!smallMarker) groups.get('Featured Labels')!.push(
       `<text id="featured-label-${++objectNumber}" data-name="${escapeXml(place.name)}" x="${point.x.toFixed(2)}" y="${(point.y + 16*strokeScale).toFixed(2)}" text-anchor="middle" font-family="Arial, sans-serif" font-size="${Math.max(6,args.theme.featuredLabelSize*strokeScale).toFixed(2)}" fill="${escapeXml(args.theme.featuredText)}" stroke="${escapeXml(args.theme.featuredHalo)}" stroke-width="${Math.max(0.5,1.5*strokeScale).toFixed(2)}" paint-order="stroke">${escapeXml(place.name)}</text>`
     )
   }
