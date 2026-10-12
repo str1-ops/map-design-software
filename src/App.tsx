@@ -4,7 +4,7 @@ import type { Map as MapLibreMap } from 'maplibre-gl'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url'
 import {
   BASE_STYLE_URL, DEFAULT_THEME, THEME_PRESETS, applyMapDesign,
-  ensureFeaturedLayers, exportMapPng, exportMapSvg, guessFeatureName, totalPrintPixels,
+  ensureFeaturedLayers, exportMapPng, exportMapSvg, guessFeatureName, railwayArtwork, totalPrintPixels,
   type CameraState, type FeaturedPlace, type LayerVisibility,
   type MapTheme, type PrintSize,
 } from './lib/mapDesign'
@@ -331,8 +331,8 @@ export default function App(){
     setLastRepairIds([])
     setRepairStatus('Last repair batch undone.')
   }
-  const exportPng=async()=>{setBusy(true);try{await exportMapPng({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.png`,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places,repairs:project.repairs,roadChoices:project.roadChoices});setNote('Print PNG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
-  const exportSvg=async()=>{setBusy(true);try{const map=liveMapRef.current;if(!map)throw new Error('The live map is not ready yet.');await exportMapSvg({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.svg`,map,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places,repairs:project.repairs,roadChoices:project.roadChoices});setNote('Editable SVG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
+  const exportPng=async()=>{setBusy(true);try{await exportMapPng({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.png`,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places,repairs:project.repairs,roadChoices:project.roadChoices,railwaySnapshot:liveMapRef.current?railwayArtwork(liveMapRef.current):null});setNote('Print PNG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
+  const exportSvg=async()=>{setBusy(true);try{const map=liveMapRef.current;if(!map)throw new Error('The live map is not ready yet.');await exportMapSvg({filename:`${fileName(project.name)}-${project.size.widthMm}x${project.size.heightMm}mm.svg`,map,size:project.size,camera:project.camera,previewViewport:viewport,theme:project.theme,visibility:project.visible,featuredPlaces:project.places,repairs:project.repairs,roadChoices:project.roadChoices,railwaySnapshot:liveMapRef.current?railwayArtwork(liveMapRef.current):null});setNote('Editable SVG exported')}catch(err){setNote(err instanceof Error?err.message:'Export failed')}finally{setBusy(false)}}
   return <div className="shell">
     <header><b>STRictons <small>MAP STUDIO</small></b><input value={project.name} onChange={e=>patch('name',e.target.value)}/><div className="export-actions"><button onClick={exportPng} disabled={busy}>↓ PNG</button><button onClick={exportSvg} disabled={busy}>↓ SVG</button></div></header>
     <aside>
