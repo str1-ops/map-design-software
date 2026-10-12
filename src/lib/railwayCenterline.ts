@@ -255,7 +255,7 @@ function reduceParallelTracks(routes: Line[]): Line[] {
 
     // A separate parallel railway close to the main line should not be
     // rendered twice; keep any non-overlapping continuation at its ends.
-    if (fraction >= 0.35) {
+    if (fraction >= 0.25) {
       let attached = false
       for (const main of accepted) {
         const original = [...main]
@@ -287,16 +287,63 @@ function reduceParallelTracks(routes: Line[]): Line[] {
         }
         if (attached && routeLength(main) > routeLength(original)) break
       }
-      if (fraction > 0.65 || attached) continue
+      // Once a physical track follows a substantial part of the accepted
+      // railway corridor, it is an alternative alignment, not another line
+      // to draw. Its genuine extensions have already been considered above.
+      continue
     }
     accepted.push(route)
   }
   return accepted
 }
 
+/**
+ * Tile edges can leave adjacent sections as separate connected components.
+ * Bridge end-to-end sections only when BOTH tangents point through the gap.
+ * Parallel lines beside each other fail this test and stay unconnected.
+ */
+function joinAlignedRoutes(input: Line[]): Line[] {
+  const paths = input.map(route => [...route])
+  for (let pass = 0; pass < input.length - 1; pass++) {
+    let best: { i: number; j: number; flipA: boolean; flipB: boolean; score: number } | null = null
+    for (let i = 0; i < paths.length; i++) for (let j = i + 1; j < paths.length; j++) {
+      const a = paths[i], b = paths[j]
+      for (const flipA of [false, true]) for (const flipB of [false, true]) {
+        const end = flipA ? a[0] : a[a.length - 1]
+        const next = flipB ? b[b.length - 1] : b[0]
+        const separation = length(end, next)
+        if (separation > 30) continue
+        const aNeighbour = flipA ? a[1] : a[a.length - 2]
+        const bNeighbour = flipB ? b[b.length - 2] : b[1]
+        const aLength = length(end, aNeighbour) || 1
+        const bLength = length(next, bNeighbour) || 1
+        // Both vectors point outwards from the pieces being connected.
+        const va = { x: (end.x - aNeighbour.x) / aLength,
+          y: (end.y - aNeighbour.y) / aLength }
+        const vb = { x: (next.x - bNeighbour.x) / bLength,
+          y: (next.y - bNeighbour.y) / bLength }
+        const direction = separation < 0.1 ? { x: va.x, y: va.y } :
+          { x: (next.x - end.x) / separation,
+            y: (next.y - end.y) / separation }
+        const outgoing = va.x * direction.x + va.y * direction.y
+        const incoming = -(vb.x * direction.x + vb.y * direction.y)
+        if (outgoing < 0.72 || incoming < 0.72) continue
+        const score = separation + (2 - outgoing - incoming) * 12
+        if (!best || score < best.score) best = { i, j, flipA, flipB, score }
+      }
+    }
+    if (!best) break
+    const a = best.flipA ? [...paths[best.i]].reverse() : paths[best.i]
+    const b = best.flipB ? [...paths[best.j]].reverse() : paths[best.j]
+    paths[best.i] = [...a, ...b.slice(length(a[a.length - 1], b[0]) < 0.5 ? 1 : 0)]
+    paths.splice(best.j, 1)
+  }
+  return paths
+}
+
 export function representativeRailwayRoutes(lines: Line[]): Line[] {
   const nodes = buildGraph(lines)
   const components = connectedComponents(nodes)
   const routes = components.map(ids => trunk(nodes, ids))
-  return reduceParallelTracks(routes)
+  return joinAlignedRoutes(reduceParallelTracks(routes))
 }
