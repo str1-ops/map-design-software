@@ -204,40 +204,68 @@ function routeHeading(route: RailPoint[], atEnd: boolean): RailPoint {
 function closeRailwayGaps(paths: RailPoint[][]): RailPoint[][] {
   const routes = paths.filter(path => path.length > 1 && polylineLength(path) >= 2)
     .map(path => [...path])
-  // Join only endpoints whose continuations point the same way. Joining two
-  // neighbouring parallel rails at their ends would create a spurious loop.
-  const maximumJoins = routes.length - 1
-  for (let iteration = 0; iteration < maximumJoins; iteration++) {
-    let best: { i: number; j: number; flipA: boolean; flipB: boolean; score: number } | null = null
-    for (let i = 0; i < routes.length; i++) for (let j = i + 1; j < routes.length; j++) {
-      const one = routes[i], two = routes[j]
-      for (const flipA of [false, true]) for (const flipB of [false, true]) {
-        const end = flipA ? one[0] : one[one.length - 1]
-        const start = flipB ? two[two.length - 1] : two[0]
-        const span = distance(end, start)
-        if (span > 19) continue
-        const ha = routeHeading(one, !flipA)
-        const hb = routeHeading(two, flipB)
-        const av = flipA ? { x: -ha.x, y: -ha.y } : ha
-        const bv = flipB ? { x: -hb.x, y: -hb.y } : hb
-        const parallel = av.x * bv.x + av.y * bv.y
-        if (parallel < 0.78) continue
-        // When there is a visible gap, the continuation must point towards
-        // it rather than connecting two ends of side-by-side railways.
-        const forward = span < 1 ? 1 :
-          (av.x * (start.x - end.x) + av.y * (start.y - end.y)) / span
-        const arrives = span < 1 ? 1 :
-          (bv.x * (start.x - end.x) + bv.y * (start.y - end.y)) / span
-        if (span > 2 && (forward < 0.38 || arrives < 0.38)) continue
-        const score = span + (1 - parallel) * 16
-        if (!best || score < best.score) best = { i, j, flipA, flipB, score }
+  const maxJoins = routes.length - 1
+  const cell = 20
+  const bucketKey = (x: number, y: number) => `${x}:${y}`
+  type Endpoint = { index: number; tail: boolean; point: RailPoint; outward: RailPoint }
+  // Search only neighbouring endpoints, not every possible route pair. Large
+  // city maps can contain hundreds of rail segments across source tiles.
+  for (let pass = 0; pass < maxJoins; pass++) {
+    const endpoints: Endpoint[] = []
+    for (let i = 0; i < routes.length; i++) {
+      const route = routes[i]
+      const head = routeHeading(route, false)
+      const tail = routeHeading(route, true)
+      endpoints.push({
+        index: i, tail: false, point: route[0],
+        outward: { x: -head.x, y: -head.y },
+      }, {
+        index: i, tail: true, point: route[route.length - 1],
+        outward: tail,
+      })
+    }
+    const grid = new globalThis.Map<string, Endpoint[]>()
+    for (const endpoint of endpoints) {
+      const x = Math.floor(endpoint.point.x / cell), y = Math.floor(endpoint.point.y / cell)
+      const key = bucketKey(x, y)
+      const bucket = grid.get(key) || []
+      bucket.push(endpoint)
+      grid.set(key, bucket)
+    }
+
+    let best: { a: Endpoint; b: Endpoint; score: number } | null = null
+    for (const a of endpoints) {
+      const gx = Math.floor(a.point.x / cell), gy = Math.floor(a.point.y / cell)
+      for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+        for (const b of grid.get(bucketKey(gx + ox, gy + oy)) || []) {
+          if (a.index === b.index) continue
+          const gap = distance(a.point, b.point)
+          if (gap > 19) continue
+          // Both endpoint tangents are directed OUT of their respective
+          // paths: valid continuation means they face opposite directions.
+          const alignment = -(a.outward.x * b.outward.x + a.outward.y * b.outward.y)
+          if (alignment < 0.78) continue
+          if (gap > 2) {
+            const dx = (b.point.x - a.point.x) / gap
+            const dy = (b.point.y - a.point.y) / gap
+            const forwardA = a.outward.x * dx + a.outward.y * dy
+            const forwardB = -(b.outward.x * dx + b.outward.y * dy)
+            if (forwardA < 0.38 || forwardB < 0.38) continue
+          }
+          const score = gap + (1 - alignment) * 16
+          if (!best || score < best.score) best = { a, b, score }
+        }
       }
     }
     if (!best) break
-    const first = best.flipA ? [...routes[best.i]].reverse() : routes[best.i]
-    const second = best.flipB ? [...routes[best.j]].reverse() : routes[best.j]
-    routes[best.i] = [...first, ...second.slice(distance(first[first.length - 1], second[0]) < 0.2 ? 1 : 0)]
-    routes.splice(best.j, 1)
+    const { a, b } = best
+    const first = a.tail ? routes[a.index] : [...routes[a.index]].reverse()
+    const second = b.tail ? [...routes[b.index]].reverse() : routes[b.index]
+    routes[a.index] = [
+      ...first,
+      ...second.slice(distance(first[first.length - 1], second[0]) < 0.2 ? 1 : 0),
+    ]
+    routes.splice(b.index, 1)
   }
   return routes
 }
