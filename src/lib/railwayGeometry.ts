@@ -1,4 +1,5 @@
 import type { Map } from 'maplibre-gl'
+import { representativeRailwayRoutes } from './railwayCenterline'
 
 // The OpenMapTiles transportation layer is divided into independently clipped
 // vector tiles. Treating those pieces as separate dashed paths restarts the
@@ -461,7 +462,7 @@ export function railFeaturesFromSource(map: Map, source: string, sourceLayer: st
 }
 
 export function buildRailwayArtwork(map: Map, lines: RailPoint[][], dash: number, gap: number): RailwayArtwork {
-  const routes = consolidateRailwayCorridors(stitchRailwayPaths(lines))
+  const routes = representativeRailwayRoutes(lines)
   const toGeo = (items: RailPoint[][]) => asCollection(items.map(points => points.map(p => {
     const ll = map.unproject([p.x, p.y])
     return [ll.lng, ll.lat] as RailCoordinate
