@@ -110,48 +110,69 @@ export function stitchRailwayPaths(
   const edges = [...unique.values()]
   const adjacent: number[][] = nodes.map(() => [])
   edges.forEach((edge, i) => { adjacent[edge.a].push(i); adjacent[edge.b].push(i) })
-  const used = new Set<number>()
+  // At junctions, pair the two edges forming the straightest continuation.
+  // This preserves the main railway as a continuous route and leaves sidings
+  // or branch tracks as independent routes without altering their geography.
+  const paired = nodes.map(() => new globalThis.Map<number, number>())
+  for (let node = 0; node < nodes.length; node++) {
+    const incident = adjacent[node]
+    const possibilities: { a: number; b: number; alignment: number }[] = []
+    for (let i = 0; i < incident.length; i++) for (let j = i + 1; j < incident.length; j++) {
+      const first = edges[incident[i]], second = edges[incident[j]]
+      const a = nodes[first.a === node ? first.b : first.a]
+      const b = nodes[second.a === node ? second.b : second.a]
+      const ax = a.x - nodes[node].x, ay = a.y - nodes[node].y
+      const bx = b.x - nodes[node].x, by = b.y - nodes[node].y
+      const alignment = (ax * bx + ay * by) /
+        (Math.hypot(ax, ay) * Math.hypot(bx, by) || 1)
+      if (alignment < -0.25) possibilities.push({
+        a: incident[i], b: incident[j], alignment,
+      })
+    }
+    possibilities.sort((a, b) => a.alignment - b.alignment)
+    for (const option of possibilities) {
+      if (paired[node].has(option.a) || paired[node].has(option.b)) continue
+      paired[node].set(option.a, option.b)
+      paired[node].set(option.b, option.a)
+    }
+  }
 
-  function trace(startNode: number, firstEdge: number): RailPoint[] {
-    const path: RailPoint[] = [nodes[startNode]]
-    let at = startNode, previous = -1, edgeIndex = firstEdge
-    while (edgeIndex >= 0 && !used.has(edgeIndex)) {
+  const used = new Set<number>()
+  const trace = (start: number, first: number): RailPoint[] => {
+    const route: RailPoint[] = [nodes[start]]
+    let at = start, edgeIndex = first
+    while (!used.has(edgeIndex)) {
       used.add(edgeIndex)
       const edge = edges[edgeIndex]
       const next = edge.a === at ? edge.b : edge.a
-      path.push(nodes[next])
-      const options = adjacent[next].filter(i => !used.has(i))
-      if (!options.length) break
-
-      let bestIndex = -1, bestStraightness = -2
-      for (const candidate of options) {
-        const other = edges[candidate].a === next ? edges[candidate].b : edges[candidate].a
-        if (other === at) continue
-        const enter = { x: nodes[next].x - nodes[at].x, y: nodes[next].y - nodes[at].y }
-        const leave = { x: nodes[other].x - nodes[next].x, y: nodes[other].y - nodes[next].y }
-        const product = (enter.x * leave.x + enter.y * leave.y) /
-          (Math.hypot(enter.x, enter.y) * Math.hypot(leave.x, leave.y) || 1)
-        if (product > bestStraightness) { bestIndex = candidate; bestStraightness = product }
-      }
-      // Avoid turning onto a crossing or unrelated branch at a junction.
-      if (bestIndex < 0 || bestStraightness < 0.25) break
-      previous = at
+      route.push(nodes[next])
+      const continuation = paired[next].get(edgeIndex)
+      if (continuation === undefined || used.has(continuation)) break
       at = next
-      edgeIndex = bestIndex
-      if (at === startNode || previous === at) break
+      edgeIndex = continuation
     }
-    return path
+    return route
   }
 
   const routes: RailPoint[][] = []
-  // Start at loose ends first so an entire through-route has one dash phase.
-  const starts = nodes.map((_, i) => i).sort((a, b) => adjacent[a].length - adjacent[b].length)
-  for (const node of starts) {
-    for (const edge of adjacent[node]) {
-      if (!used.has(edge)) {
-        const route = trace(node, edge)
-        if (route.length > 1) routes.push(route)
-      }
+  // Start with every unpaired endpoint of a route. All paired edges are
+  // travelled through in one pass, even across degree-three junctions.
+  const starts = nodes.flatMap((_, node) => adjacent[node]
+    .filter(edge => !paired[node].has(edge))
+    .map(edge => ({ node, edge })))
+    .sort((a, b) => nodes[a.node].y - nodes[b.node].y ||
+      nodes[a.node].x - nodes[b.node].x)
+  for (const start of starts) {
+    if (!used.has(start.edge)) {
+      const route = trace(start.node, start.edge)
+      if (route.length > 1) routes.push(route)
+    }
+  }
+  // Closed-loop railways have no loose ends.
+  for (let index = 0; index < edges.length; index++) {
+    if (!used.has(index)) {
+      const route = trace(edges[index].a, index)
+      if (route.length > 1) routes.push(route)
     }
   }
   return routes
